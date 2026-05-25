@@ -1,330 +1,189 @@
-name: Flutter Build APK
+name: Flutter Build APK (Ultimate Safe)
 
 on:
   workflow_dispatch:
     inputs:
       job_id:
-        description: "Job ID dari bot"
+        description: 'Job ID dari bot'
         required: true
-
       zip_path:
-        description: "ZIP path dari repo"
+        description: 'Path ZIP di repo (misal: uploads/file.zip)'
         required: false
-        default: ""
-
+        default: ''
       zip_url:
-        description: "ZIP URL eksternal"
+        description: 'URL ZIP eksternal'
         required: false
-        default: ""
-
+        default: ''
       project_type:
-        description: "flutter atau gradle"
+        description: 'flutter atau gradle'
         required: false
-        default: "flutter"
-
+        default: 'flutter'
       build_type:
-        description: "debug atau release"
+        description: 'debug atau release'
         required: false
-        default: "release"
+        default: 'release'
+      java_version:
+        description: 'Versi Java (11 untuk lama, 17 standar, 21 untuk terbaru)'
+        required: false
+        default: '17'
+      flutter_version:
+        description: 'Versi Flutter (Kosongkan = otomatis stable terbaru, atau isi misal 3.10.0)'
+        required: false
+        default: ''
+      app_name:
+        description: 'Nama File APK (Tanpa .apk, misal: Xky). Kosongkan = app-release.apk'
+        required: false
+        default: ''
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
-
-      # =========================================================
-      # CHECKOUT
-      # =========================================================
-
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # =========================================================
-      # SETUP JAVA MULTI VERSION
-      # =========================================================
-
-      - name: Setup Java 17
+      - name: Setup Java ${{ inputs.java_version }}
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Setup Java 11
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "11"
-
-      - name: Setup Java 8
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "8"
-
-      # =========================================================
-      # SETUP FLUTTER
-      # =========================================================
+          distribution: 'temurin'
+          java-version: ${{ inputs.java_version }}
 
       - name: Setup Flutter
         if: ${{ inputs.project_type == 'flutter' }}
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.19.6"
-          channel: stable
+          flutter-version: ${{ inputs.flutter_version != '' && inputs.flutter_version || null }}
+          channel: 'stable'
           cache: true
 
-      # =========================================================
-      # CACHE
-      # =========================================================
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}
-
-      - name: Cache Flutter Pub
-        if: ${{ inputs.project_type == 'flutter' }}
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.pub-cache
-          key: flutter-pub-${{ runner.os }}
-
-      # =========================================================
-      # ACCEPT ANDROID LICENSE
-      # =========================================================
-
-      - name: Accept Android Licenses
-        run: yes | flutter doctor --android-licenses || true
-
-      # =========================================================
-      # DOWNLOAD ZIP FROM REPO
-      # =========================================================
-
+      # ── Ambil ZIP dari repo (Anti-Error Flatten) ────────────────
       - name: Extract ZIP from Repo
         if: ${{ inputs.zip_path != '' }}
         run: |
           mkdir -p project
-
-          unzip "${{ inputs.zip_path }}" -d project
-
-          INNER=$(ls project | head -1)
-
-          if [ -d "project/$INNER" ]; then
-            shopt -s dotglob
-            mv project/$INNER/* project/ 2>/dev/null || true
-            rmdir project/$INNER 2>/dev/null || true
+          echo "Mengekstrak ${{ inputs.zip_path }}..."
+          unzip -q "${{ inputs.zip_path }}" -d temp_extract
+          
+          shopt -s dotglob nullglob
+          dirs=(temp_extract/*)
+          
+          if [ ${#dirs[@]} -eq 1 ] && [ -d "${dirs[0]}" ]; then
+            echo "📦 Terdeteksi 1 folder pembungkus, memindahkan isinya ke atas..."
+            mv "${dirs[0]}"/* project/ 2>/dev/null
+            mv "${dirs[0]}"/.* project/ 2>/dev/null || true
+          else
+            echo "📦 Tidak ada folder pembungkus, memindahkan semua file..."
+            mv temp_extract/* project/ 2>/dev/null
+            mv temp_extract/.* project/ 2>/dev/null || true
           fi
+          rm -rf temp_extract
 
-      # =========================================================
-      # DOWNLOAD ZIP FROM URL
-      # =========================================================
-
+            # ── Ambil ZIP dari URL (Anti-Error Flatten & Bulletproof Download) ──
       - name: Download ZIP from URL
         if: ${{ inputs.zip_url != '' && inputs.zip_path == '' }}
         run: |
           mkdir -p project
-
-          wget -O project.zip "${{ inputs.zip_url }}"
-
-          unzip project.zip -d project
-
-          INNER=$(ls project | head -1)
-
-          if [ -d "project/$INNER" ]; then
-            shopt -s dotglob
-            mv project/$INNER/* project/ 2>/dev/null || true
-            rmdir project/$INNER 2>/dev/null || true
-          fi
-
-      # =========================================================
-      # VERIFY PROJECT
-      # =========================================================
-
-      - name: Verify Project
-        run: |
-          echo "========== PROJECT FILES =========="
-          ls -la project/
-
-          if [ "${{ inputs.project_type }}" = "flutter" ]; then
-
-            if [ ! -f project/pubspec.yaml ]; then
-              echo "❌ pubspec.yaml tidak ditemukan!"
-              exit 1
-            fi
-
-            echo "✅ Flutter project detected"
-
+          echo "Mendownload dari URL..."
+          # Ditambahkan -L untuk follow redirect dan User-Agent agar GoFile/CDN tidak memblokir
+          wget -q -L --user-agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" -O project.zip "${{ inputs.zip_url }}"
+          unzip -q project.zip -d temp_extract
+          
+          shopt -s dotglob nullglob
+          dirs=(temp_extract/*)
+          
+          if [ ${#dirs[@]} -eq 1 ] && [ -d "${dirs[0]}" ]; then
+            echo "📦 Terdeteksi 1 folder pembungkus, memindahkan isinya ke atas..."
+            mv "${dirs[0]}"/* project/ 2>/dev/null
+            mv "${dirs[0]}"/.* project/ 2>/dev/null || true
           else
+            echo "📦 Tidak ada folder pembungkus, memindahkan semua file..."
+            mv temp_extract/* project/ 2>/dev/null
+            mv temp_extract/.* project/ 2>/dev/null || true
+          fi
+          rm -rf temp_extract project.zip
 
-            if [ ! -f project/build.gradle ] && [ ! -f project/app/build.gradle ]; then
-              echo "❌ build.gradle tidak ditemukan!"
-              exit 1
+      # ── Verifikasi project & Fix Environment ────────────────────
+      - name: Verify Project and Fix Environment
+        run: |
+          echo "Isi folder project:"
+          ls -la project/
+          
+          if [ "${{ inputs.project_type }}" = "flutter" ]; then
+            if [ ! -f project/pubspec.yaml ]; then echo "❌ pubspec.yaml tidak ditemukan!"; exit 1; fi
+            echo "✅ pubspec.yaml ditemukan"
+            # Fix local.properties agar Gradle tidak error SDK not found
+            if [ -d "project/android" ]; then
+              echo "sdk.dir=$ANDROID_SDK_ROOT" > project/android/local.properties
+              echo "✅ local.properties berhasil dibuat"
             fi
-
-            echo "✅ Android Studio project detected"
-
+          else
+            if [ ! -f project/build.gradle ] && [ ! -f project/build.gradle.kts ] && [ ! -f project/app/build.gradle ] && [ ! -f project/app/build.gradle.kts ]; then 
+              echo "❌ build.gradle tidak ditemukan!"; exit 1; 
+            fi
+            echo "✅ build.gradle ditemukan"
+            echo "sdk.dir=$ANDROID_SDK_ROOT" > project/local.properties
+            echo "✅ local.properties berhasil dibuat"
           fi
 
-      # =========================================================
-      # AUTO DETECT JAVA VERSION
-      # =========================================================
-
-      - name: Detect Java Version
-        working-directory: project
-        run: |
-          JAVA_VER="17"
-
-          if [ -f "gradle.properties" ]; then
-            cat gradle.properties
-          fi
-
-          if grep -r "VERSION_1_8" . > /dev/null 2>&1; then
-            JAVA_VER="8"
-          fi
-
-          if grep -r "JavaVersion.VERSION_11" . > /dev/null 2>&1; then
-            JAVA_VER="11"
-          fi
-
-          if grep -r "JavaVersion.VERSION_17" . > /dev/null 2>&1; then
-            JAVA_VER="17"
-          fi
-
-          echo "JAVA_VER=$JAVA_VER" >> $GITHUB_ENV
-
-      # =========================================================
-      # SWITCH JAVA VERSION
-      # =========================================================
-
-      - name: Switch Java 8
-        if: env.JAVA_VER == '8'
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "8"
-
-      - name: Switch Java 11
-        if: env.JAVA_VER == '11'
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "11"
-
-      - name: Switch Java 17
-        if: env.JAVA_VER == '17'
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      # =========================================================
-      # FIX PERMISSION
-      # =========================================================
-
-      - name: Grant Execute Permission
-        working-directory: project
-        run: |
-          chmod +x gradlew || true
-
-      # =========================================================
-      # FLUTTER PUB GET
-      # =========================================================
-
+      # ── Flutter Build ──────────────────────────────────────────
       - name: Flutter Pub Get
         if: ${{ inputs.project_type == 'flutter' }}
         working-directory: project
-        run: |
-          flutter clean
-          flutter pub get
+        run: flutter pub get
 
-      # =========================================================
-      # BUILD FLUTTER APK
-      # =========================================================
-
-      - name: Build Flutter APK
+      - name: Flutter Build APK
         if: ${{ inputs.project_type == 'flutter' }}
         working-directory: project
         run: |
+          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons
+          echo "✅ Flutter build selesai"
 
-          if [ "${{ inputs.build_type }}" = "debug" ]; then
-
-            flutter build apk --debug --no-tree-shake-icons
-
-          else
-
-            flutter build apk --release --no-tree-shake-icons
-
-          fi
-
-          echo "========== APK RESULT =========="
-          find build -name "*.apk" -type f
-
-      # =========================================================
-      # BUILD GRADLE APK
-      # =========================================================
-
-      - name: Build Gradle APK
+      # ── Gradle Build ───────────────────────────────────────────
+      - name: Gradle Build APK
         if: ${{ inputs.project_type == 'gradle' }}
         working-directory: project
         run: |
-
-          chmod +x gradlew || true
-
+          chmod +x gradlew 2>/dev/null || chmod +x gradle.bat 2>/dev/null || true
           if [ "${{ inputs.build_type }}" = "debug" ]; then
-
-            ./gradlew assembleDebug --stacktrace
-
+            ./gradlew assembleDebug
           else
-
-            ./gradlew assembleRelease --stacktrace
-
+            ./gradlew assembleRelease
           fi
+          echo "✅ Gradle build selesai"
 
-          echo "========== APK RESULT =========="
-          find . -name "*.apk" -type f
-
-      # =========================================================
-      # UPLOAD FLUTTER APK
-      # =========================================================
-
-      - name: Upload Flutter APK
-        if: ${{ inputs.project_type == 'flutter' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk-${{ inputs.job_id }}
-          path: |
-            project/build/app/outputs/flutter-apk/*.apk
-            project/build/app/outputs/apk/**/*.apk
-          retention-days: 3
-          if-no-files-found: error
-
-      # =========================================================
-      # UPLOAD GRADLE APK
-      # =========================================================
-
-      - name: Upload Gradle APK
-        if: ${{ inputs.project_type == 'gradle' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk-${{ inputs.job_id }}
-          path: |
-            project/**/*.apk
-          retention-days: 3
-          if-no-files-found: error
-
-      # =========================================================
-      # FINAL LOG
-      # =========================================================
-
-      - name: Finish
+      # ── Rename APK agar Sesuai Permintaan ──────────────────────
+      - name: Find and Rename APK
         run: |
-          echo "✅ BUILD SELESAI"
-          echo "PROJECT TYPE : ${{ inputs.project_type }}"
-          echo "BUILD TYPE   : ${{ inputs.build_type }}"
-          echo "JOB ID       : ${{ inputs.job_id }}"
+          mkdir -p final_apk
+          # Cari file APK apapun yang dihasilkan
+          APK_FILE=$(find project/build -name "*.apk" -type f | head -n 1)
+          
+          if [ -z "$APK_FILE" ]; then
+            echo "❌ Gagal: Tidak ada file APK yang ditemukan setelah build!"
+            exit 1
+          fi
+          
+          echo "📝 APK mentah ditemukan di: $APK_FILE"
+          
+          # Logika penamaan APK
+          if [ -n "${{ inputs.app_name }}" ]; then
+            NAMA_AKHIR="${{ inputs.app_name }}-${{ inputs.build_type }}.apk"
+          else
+            NAMA_AKHIR="app-${{ inputs.build_type }}.apk"
+          fi
+          
+          echo "🔄 Mengubah nama file APK menjadi: $NAMA_AKHIR"
+          mv "$APK_FILE" "final_apk/$NAMA_AKHIR"
+          echo "✅ Rename berhasil! Isi folder final_apk:"
+          ls -lh final_apk/
+
+      # ── Upload Artifact ────────────────────────────────────────
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ inputs.job_id }}
+          path: final_apk/*.apk
+          retention-days: 3
+          if-no-files-found: error
