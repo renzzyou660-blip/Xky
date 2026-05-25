@@ -1,4 +1,4 @@
-name: Flutter Build APK (Ultimate Safe)
+name: Flutter Build APK 
 
 on:
   workflow_dispatch:
@@ -86,7 +86,6 @@ jobs:
         run: |
           mkdir -p project
           echo "Mendownload dari URL..."
-          # Ditambahkan -L untuk follow redirect dan User-Agent agar GoFile/CDN tidak memblokir
           wget -q -L --user-agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" -O project.zip "${{ inputs.zip_url }}"
           unzip -q project.zip -d temp_extract
           
@@ -113,7 +112,6 @@ jobs:
           if [ "${{ inputs.project_type }}" = "flutter" ]; then
             if [ ! -f project/pubspec.yaml ]; then echo "❌ pubspec.yaml tidak ditemukan!"; exit 1; fi
             echo "✅ pubspec.yaml ditemukan"
-            # Fix local.properties agar Gradle tidak error SDK not found
             if [ -d "project/android" ]; then
               echo "sdk.dir=$ANDROID_SDK_ROOT" > project/android/local.properties
               echo "✅ local.properties berhasil dibuat"
@@ -132,6 +130,61 @@ jobs:
         if: ${{ inputs.project_type == 'flutter' }}
         working-directory: project
         run: flutter pub get
+
+      - name: Fix Android Gradle & Kotlin Version Compatibility
+        if: ${{ inputs.project_type == 'flutter' }}
+        working-directory: project
+        run: |
+          # Fix gradlew permission
+          if [ -f android/gradlew ]; then
+            chmod +x android/gradlew
+            echo "✅ gradlew permission fixed"
+          fi
+
+          # Fix namespace jika ada package di AndroidManifest tapi tidak ada namespace di build.gradle
+          if [ -f android/app/build.gradle ]; then
+            if ! grep -q "namespace" android/app/build.gradle; then
+              PKG=$(grep -oP 'package="\K[^"]+' android/app/src/main/AndroidManifest.xml 2>/dev/null || true)
+              if [ -n "$PKG" ]; then
+                sed -i "/^android {/a\\    namespace \"$PKG\"" android/app/build.gradle
+                echo "✅ namespace '$PKG' ditambahkan ke build.gradle"
+              fi
+            fi
+          fi
+
+          # Fix compileSdkVersion terlalu lama (minimal 33)
+          if [ -f android/app/build.gradle ]; then
+            COMPILE_SDK=$(grep -oP 'compileSdk(Version)?\s+\K\d+' android/app/build.gradle | head -1)
+            if [ -n "$COMPILE_SDK" ] && [ "$COMPILE_SDK" -lt 33 ]; then
+              sed -i "s/compileSdk\(Version\)\?\s\+[0-9]\+/compileSdk 34/g" android/app/build.gradle
+              echo "✅ compileSdk dinaikkan ke 34"
+            fi
+          fi
+
+          # Fix targetSdkVersion terlalu lama (minimal 33)
+          if [ -f android/app/build.gradle ]; then
+            TARGET_SDK=$(grep -oP 'targetSdk(Version)?\s+\K\d+' android/app/build.gradle | head -1)
+            if [ -n "$TARGET_SDK" ] && [ "$TARGET_SDK" -lt 33 ]; then
+              sed -i "s/targetSdk\(Version\)\?\s\+[0-9]\+/targetSdk 34/g" android/app/build.gradle
+              echo "✅ targetSdk dinaikkan ke 34"
+            fi
+          fi
+
+          # Paksa AGP (Android Gradle Plugin) ke versi aman 8.1.0 jika terlalu lama
+          if [ -f android/build.gradle ]; then
+            sed -i "s/com.android.tools.build:gradle:[0-9.]\+/com.android.tools.build:gradle:8.1.0/g" android/build.gradle
+            echo "✅ AGP dipaksa ke 8.1.0"
+          fi
+
+          # Fix Gradle wrapper ke versi aman 8.3
+          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then
+            sed -i "s|distributionUrl=.*|distributionUrl=https\://services.gradle.org/distributions/gradle-8.3-bin.zip|g" android/gradle/wrapper/gradle-wrapper.properties
+            echo "✅ Gradle wrapper dipaksa ke 8.3"
+          fi
+
+          # Hapus lock file yang bisa menyebabkan conflict
+          find . -name "*.lock" -not -path "*/\.git/*" -delete 2>/dev/null || true
+          echo "✅ Lock files dibersihkan"
 
       - name: Flutter Build APK
         if: ${{ inputs.project_type == 'flutter' }}
@@ -157,7 +210,6 @@ jobs:
       - name: Find and Rename APK
         run: |
           mkdir -p final_apk
-          # Cari file APK apapun yang dihasilkan
           APK_FILE=$(find project/build -name "*.apk" -type f | head -n 1)
           
           if [ -z "$APK_FILE" ]; then
@@ -167,7 +219,6 @@ jobs:
           
           echo "📝 APK mentah ditemukan di: $APK_FILE"
           
-          # Logika penamaan APK
           if [ -n "${{ inputs.app_name }}" ]; then
             NAMA_AKHIR="${{ inputs.app_name }}-${{ inputs.build_type }}.apk"
           else
