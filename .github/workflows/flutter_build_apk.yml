@@ -1,302 +1,74 @@
-name: Flutter Build APK
+name: Build Flutter APK (zip path OR url)
 
 on:
   workflow_dispatch:
     inputs:
       job_id:
-        description: 'Job ID dari bot'
+        description: "ID job dari Telegram"
         required: true
       zip_path:
-        description: 'Path ZIP di repo (misal: uploads/file.zip)'
-        required: true
-      project_type:
-        description: 'flutter atau gradle'
+        description: "Path zip di repo (mis: uploads/xxx.zip). Kosongkan jika pakai zip_url"
         required: false
-        default: 'flutter'
-      build_type:
-        description: 'debug atau release'
+        default: ""
+      zip_url:
+        description: "Direct URL zip. Kosongkan jika pakai zip_path"
         required: false
-        default: 'release'
-      java_version:
-        description: 'Versi Java (11, 17, 21)'
-        required: false
-        default: '17'
-      flutter_version:
-        description: 'Versi Flutter (kosong = stable terbaru)'
-        required: false
-        default: ''
-      app_name:
-        description: 'Nama APK (tanpa .apk)'
-        required: false
-        default: ''
+        default: ""
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: ${{ inputs.java_version }}
+          distribution: temurin
+          java-version: "17"
 
       - name: Setup Flutter
-        if: ${{ inputs.project_type == 'flutter' }}
         uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ inputs.flutter_version != '' && inputs.flutter_version || null }}
-          channel: 'stable'
-          cache: true
-
-      - name: Extract ZIP from Repo
-        run: |
-          mkdir -p project
-          echo "Mengekstrak ${{ inputs.zip_path }}..."
-          unzip -q "${{ inputs.zip_path }}" -d temp_extract
-
-          shopt -s dotglob nullglob
-          dirs=(temp_extract/*)
-
-          if [ ${#dirs[@]} -eq 1 ] && [ -d "${dirs[0]}" ]; then
-            echo "📦 Terdeteksi 1 folder pembungkus, memindahkan isinya ke project/"
-            mv "${dirs[0]}"/* project/ 2>/dev/null
-            mv "${dirs[0]}"/.* project/ 2>/dev/null || true
-          else
-            echo "📦 Tidak ada folder pembungkus, memindahkan semua file ke project/"
-            mv temp_extract/* project/ 2>/dev/null
-            mv temp_extract/.* project/ 2>/dev/null || true
-          fi
-          rm -rf temp_extract
-
-          echo "📁 Isi folder project setelah ekstrak:"
-          ls -la project/
-
-      - name: Verify Project
-        run: |
-          if [ "${{ inputs.project_type }}" = "flutter" ]; then
-            if [ ! -f project/pubspec.yaml ]; then
-              echo "❌ pubspec.yaml tidak ditemukan!"
-              exit 1
-            fi
-            echo "✅ pubspec.yaml ditemukan"
-          else
-            if [ ! -f project/build.gradle ] && [ ! -f project/build.gradle.kts ] && [ ! -f project/app/build.gradle ] && [ ! -f project/app/build.gradle.kts ]; then
-              echo "❌ build.gradle tidak ditemukan!"
-              exit 1
-            fi
-            echo "✅ build.gradle ditemukan"
-          fi
-
-      - name: Flutter Pub Get
-        if: ${{ inputs.project_type == 'flutter' }}
-        working-directory: project
-        run: flutter pub get
-
-      - name: Fix Android Gradle Compatibility
-        if: ${{ inputs.project_type == 'flutter' }}
-        working-directory: project
-        run: |
-          if [ -f android/gradlew ]; then
-            chmod +x android/gradlew
-          fi
-
-          if [ -f android/app/build.gradle ]; then
-            if ! grep -q "namespace" android/app/build.gradle; then
-              PKG=$(grep -oP 'package="\K[^"]+' android/app/src/main/AndroidManifest.xml 2>/dev/null || echo "com.example.app")
-              sed -i "/^android {/a\\    namespace \"$PKG\"" android/app/build.gradle
-            fi
-          fi
-
-          if [ -f android/app/build.gradle ]; then
-            sed -i "s/compileSdk\(Version\)\?\s\+[0-9]\+/compileSdk 34/g" android/app/build.gradle
-            sed -i "s/targetSdk\(Version\)\?\s\+[0-9]\+/targetSdk 34/g" android/app/build.gradle
-            sed -i "s/minSdk\(Version\)\?\s\+[0-9]\+/minSdkVersion 21/g" android/app/build.gradle
-            sed -i "s/flutter\.compileSdkVersion/34/g" android/app/build.gradle
-            sed -i "s/flutter\.targetSdkVersion/34/g" android/app/build.gradle
-            sed -i "s/flutter\.minSdkVersion/21/g" android/app/build.gradle
-          fi
-
-          if [ -f android/build.gradle ]; then
-            sed -i "s/com.android.tools.build:gradle:[0-9.]*/com.android.tools.build:gradle:7.4.2/g" android/build.gradle
-          fi
-
-          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then
-            sed -i "s|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.0-bin.zip|g" android/gradle/wrapper/gradle-wrapper.properties
-          fi
-
-          if [ -f android/build.gradle ]; then
-            KOTLIN_VER=$(grep -oP "ext\.kotlin_version\s*=\s*['\"]?\K[0-9.]+" android/build.gradle | head -1)
-            if [ -n "$KOTLIN_VER" ]; then
-              MAJOR=$(echo "$KOTLIN_VER" | cut -d. -f1)
-              MINOR=$(echo "$KOTLIN_VER" | cut -d. -f2)
-              if [ "$MAJOR" -eq 1 ] && [ "$MINOR" -le 6 ]; then
-                sed -i "s/ext\.kotlin_version\s*=\s*['\"][^'\"]*['\"]/ext.kotlin_version = '1.9.0'/g" android/build.gradle
-              fi
-            fi
-          fi
-
-          GRADLE_PROPS="android/gradle.properties"
-          if [ -f "$GRADLE_PROPS" ]; then
-            sed -i "s/android.enableJetifier=.*/android.enableJetifier=false/g" "$GRADLE_PROPS"
-            sed -i "s/org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m -XX:+UseParallelGC -Dfile.encoding=UTF-8/g" "$GRADLE_PROPS"
-          else
-            mkdir -p android
-            echo "android.enableJetifier=false" >> "$GRADLE_PROPS"
-            echo "org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m -XX:+UseParallelGC -Dfile.encoding=UTF-8" >> "$GRADLE_PROPS"
-          fi
-
-          if [ -f android/app/build.gradle ]; then
-            sed -i "s/minifyEnabled true/minifyEnabled false/g" android/app/build.gradle
-            sed -i "s/shrinkResources true/shrinkResources false/g" android/app/build.gradle
-          fi
-
-          if [ -f android/app/build.gradle ]; then
-            if ! grep -q "lintOptions" android/app/build.gradle; then
-              sed -i "/android {/a\\    lintOptions {\n        checkReleaseBuilds false\n        abortOnError false\n    }" android/app/build.gradle
-            fi
-          fi
-
-          echo "✅ Fix Gradle selesai"
-
-      - name: Build APK
-        if: ${{ inputs.project_type == 'flutter' }}
-        working-directory: project
-        run: |
-          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons
-          echo "✅ Build APK selesai"
-
-      - name: Gradle Build APK
-        if: ${{ inputs.project_type == 'gradle' }}
-        working-directory: project
-        run: |
-          chmod +x gradlew 2>/dev/null || true
-          if [ "${{ inputs.build_type }}" = "debug" ]; then
-            ./gradlew assembleDebug --no-daemon
-          else
-            ./gradlew assembleRelease --no-daemon
-          fi
-          echo "✅ Gradle build selesai"
-
-      - name: Find and Rename APK
-        run: |
-          mkdir -p final_apk
-          APK_FILE=$(find project/build -name "*.apk" -type f | head -n 1)
-
-          if [ -z "$APK_FILE" ]; then
-            echo "❌ Gagal: Tidak ada file APK yang ditemukan!"
-            exit 1
-          fi
-
-          echo "📝 APK ditemukan di: $APK_FILE"
-
-          if [ -n "${{ inputs.app_name }}" ]; then
-            NAMA_AKHIR="${{ inputs.app_name }}-${{ inputs.build_type }}.apk"
-          else
-            NAMA_AKHIR="app-${{ inputs.build_type }}.apk"
-          fi
-
-          mv "$APK_FILE" "final_apk/$NAMA_AKHIR"
-          echo "✅ APK siap: $NAMA_AKHIR"
-          echo "APK_NAME=$NAMA_AKHIR" >> $GITHUB_ENV
-
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk-${{ inputs.job_id }}
-          path: final_apk/*.apk
-          retention-days: 3
-          if-no-files-found: error        uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      - name: Extract ZIP and handle folder wrapper
+      - name: Prepare workspace
         run: |
+          set -e
           mkdir -p work
-          echo "Mengekstrak ${{ inputs.zip_path }}..."
-          cp "${{ inputs.zip_path }}" work/project.zip
           cd work
-          unzip -q project.zip -d temp_extract
 
-          shopt -s dotglob nullglob
-          dirs=(temp_extract/*)
-
-          if [ ${#dirs[@]} -eq 1 ] && [ -d "${dirs[0]}" ]; then
-            echo "📦 Terdeteksi 1 folder pembungkus, memindahkan isinya..."
-            mv "${dirs[0]}"/* project/ 2>/dev/null
-            mv "${dirs[0]}"/.* project/ 2>/dev/null || true
+          if [ -n "${{ inputs.zip_url }}" ]; then
+            echo "MODE: zip_url"
+            curl -L --fail --retry 3 --retry-delay 2 "${{ inputs.zip_url }}" -o project.zip
+          elif [ -n "${{ inputs.zip_path }}" ]; then
+            echo "MODE: zip_path"
+            cp "../${{ inputs.zip_path }}" project.zip
           else
-            echo "📦 Tidak ada folder pembungkus, memindahkan semua file..."
-            mv temp_extract/* project/ 2>/dev/null
-            mv temp_extract/.* project/ 2>/dev/null || true
+            echo "ERROR: zip_url atau zip_path wajib diisi."
+            exit 1
           fi
-          rm -rf temp_extract
 
-          echo "📁 Isi folder project:"
-          ls -la project/
+          unzip -q project.zip -d project
 
       - name: Flutter pub get
         working-directory: work/project
         run: flutter pub get
 
-      - name: Fix Android Gradle (biar kompatibel)
+      - name: Build APK (release)
         working-directory: work/project
-        run: |
-          if [ -f android/app/build.gradle ]; then
-            sed -i "s/compileSdk[0-9]\+/compileSdk 34/g" android/app/build.gradle
-            sed -i "s/targetSdk[0-9]\+/targetSdk 34/g" android/app/build.gradle
-            sed -i "s/minSdk[0-9]\+/minSdk 21/g" android/app/build.gradle
-            
-            if ! grep -q "namespace" android/app/build.gradle; then
-              PKG=$(grep -oP 'package="\K[^"]+' android/app/src/main/AndroidManifest.xml 2>/dev/null || echo "com.example.app")
-              sed -i "/^android {/a\\    namespace \"$PKG\"" android/app/build.gradle
-            fi
-          fi
+        run: flutter build apk --release
 
-          if [ -f android/build.gradle ]; then
-            sed -i "s/com.android.tools.build:gradle:[0-9.]*/com.android.tools.build:gradle:7.4.2/g" android/build.gradle
-          fi
-
-          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then
-            sed -i "s|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.0-bin.zip|g" android/gradle/wrapper/gradle-wrapper.properties
-          fi
-
-          echo "✅ Fix Gradle selesai"
-
-      - name: Build APK
-        working-directory: work/project
-        run: |
-          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons
-          echo "✅ Build selesai"
-
-      - name: Collect and rename APK
+      - name: Collect outputs
         run: |
           mkdir -p out
-          APK_FILE=$(find work/project/build -name "*.apk" -type f | head -n 1)
-
-          if [ -z "$APK_FILE" ]; then
-            echo "❌ APK tidak ditemukan!"
-            exit 1
-          fi
-
-          if [ -n "${{ inputs.app_name }}" ]; then
-            NAMA_AKHIR="${{ inputs.app_name }}-${{ inputs.build_type }}.apk"
-          else
-            NAMA_AKHIR="app-${{ inputs.build_type }}.apk"
-          fi
-
-          cp "$APK_FILE" "out/$NAMA_AKHIR"
-          echo "✅ APK siap: $NAMA_AKHIR"
+          cp work/project/build/app/outputs/flutter-apk/app-release.apk "out/app-release-${{ inputs.job_id }}.apk"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ inputs.job_id }}
           path: out/*.apk
-          retention-days: 3
-          if-no-files-found: error
