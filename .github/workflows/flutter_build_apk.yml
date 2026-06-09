@@ -8,12 +8,7 @@ on:
         required: true
       zip_path:
         description: 'Path ZIP di repo (misal: uploads/file.zip)'
-        required: false
-        default: ''
-      zip_url:
-        description: 'URL ZIP eksternal'
-        required: false
-        default: ''
+        required: true
       project_type:
         description: 'flutter atau gradle'
         required: false
@@ -23,15 +18,15 @@ on:
         required: false
         default: 'release'
       java_version:
-        description: 'Versi Java (11 untuk lama, 17 standar, 21 untuk terbaru)'
+        description: 'Versi Java (11, 17, 21)'
         required: false
         default: '17'
       flutter_version:
-        description: 'Versi Flutter (Kosongkan = otomatis stable terbaru, atau isi misal 3.10.0)'
+        description: 'Versi Flutter (kosong = stable terbaru)'
         required: false
         default: ''
       app_name:
-        description: 'Nama File APK (Tanpa .apk, misal: Xky). Kosongkan = app-release.apk'
+        description: 'Nama APK (tanpa .apk)'
         required: false
         default: ''
 
@@ -44,7 +39,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Java ${{ inputs.java_version }}
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -59,7 +54,6 @@ jobs:
           cache: true
 
       - name: Extract ZIP from Repo
-        if: ${{ inputs.zip_path != '' }}
         run: |
           mkdir -p project
           echo "Mengekstrak ${{ inputs.zip_path }}..."
@@ -79,48 +73,23 @@ jobs:
           fi
           rm -rf temp_extract
 
-      - name: Download ZIP from URL
-        if: ${{ inputs.zip_url != '' && inputs.zip_path == '' }}
-        run: |
-          mkdir -p project
-          echo "Mendownload dari URL..."
-          wget -q -L --user-agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" -O project.zip "${{ inputs.zip_url }}"
-          unzip -q project.zip -d temp_extract
-
-          shopt -s dotglob nullglob
-          dirs=(temp_extract/*)
-
-          if [ ${#dirs[@]} -eq 1 ] && [ -d "${dirs[0]}" ]; then
-            echo "📦 Terdeteksi 1 folder pembungkus, memindahkan isinya ke atas..."
-            mv "${dirs[0]}"/* project/ 2>/dev/null
-            mv "${dirs[0]}"/.* project/ 2>/dev/null || true
-          else
-            echo "📦 Tidak ada folder pembungkus, memindahkan semua file..."
-            mv temp_extract/* project/ 2>/dev/null
-            mv temp_extract/.* project/ 2>/dev/null || true
-          fi
-          rm -rf temp_extract project.zip
-
-      - name: Verify Project and Fix Environment
+      - name: Verify Project
         run: |
           echo "Isi folder project:"
           ls -la project/
 
           if [ "${{ inputs.project_type }}" = "flutter" ]; then
-            if [ ! -f project/pubspec.yaml ]; then echo "❌ pubspec.yaml tidak ditemukan!"; exit 1; fi
-            echo "✅ pubspec.yaml ditemukan"
-            if [ -d "project/android" ]; then
-              echo "sdk.dir=$ANDROID_SDK_ROOT" > project/android/local.properties
-              echo "flutter.sdk=$(which flutter | sed 's|/bin/flutter||')" >> project/android/local.properties
-              echo "✅ local.properties berhasil dibuat"
+            if [ ! -f project/pubspec.yaml ]; then
+              echo "❌ pubspec.yaml tidak ditemukan!"
+              exit 1
             fi
+            echo "✅ pubspec.yaml ditemukan"
           else
             if [ ! -f project/build.gradle ] && [ ! -f project/build.gradle.kts ] && [ ! -f project/app/build.gradle ] && [ ! -f project/app/build.gradle.kts ]; then
-              echo "❌ build.gradle tidak ditemukan!"; exit 1;
+              echo "❌ build.gradle tidak ditemukan!"
+              exit 1
             fi
             echo "✅ build.gradle ditemukan"
-            echo "sdk.dir=$ANDROID_SDK_ROOT" > project/local.properties
-            echo "✅ local.properties berhasil dibuat"
           fi
 
       - name: Flutter Pub Get
@@ -128,183 +97,9 @@ jobs:
         working-directory: project
         run: flutter pub get
 
-      - name: Fix Android Gradle & Kotlin Version Compatibility
-        if: ${{ inputs.project_type == 'flutter' }}
-        working-directory: project
-        run: |
-          if [ -f android/gradlew ]; then
-            chmod +x android/gradlew
-            echo "✅ gradlew permission fixed"
-          fi
-
-          if [ -f android/app/build.gradle ]; then
-            if ! grep -q "namespace" android/app/build.gradle; then
-              PKG=$(grep -oP 'package="\K[^"]+' android/app/src/main/AndroidManifest.xml 2>/dev/null || true)
-              if [ -n "$PKG" ]; then
-                sed -i "/^android {/a\\    namespace \"$PKG\"" android/app/build.gradle
-                echo "✅ namespace '$PKG' ditambahkan ke build.gradle"
-              fi
-            fi
-          fi
-
-          if [ -f android/app/build.gradle ]; then
-            COMPILE_SDK=$(grep -oP 'compileSdk(Version)?\s+\K\d+' android/app/build.gradle | head -1)
-            if [ -n "$COMPILE_SDK" ] && [ "$COMPILE_SDK" -lt 34 ]; then
-              sed -i "s/compileSdk\(Version\)\?\s\+[0-9]\+/compileSdk 34/g" android/app/build.gradle
-              echo "✅ compileSdk dinaikkan ke 34"
-            fi
-            if grep -q "flutter\.compileSdkVersion" android/app/build.gradle; then
-              sed -i "s/flutter\.compileSdkVersion/34/g" android/app/build.gradle
-              echo "✅ flutter.compileSdkVersion diganti ke 34"
-            fi
-          fi
-
-          if [ -f android/app/build.gradle ]; then
-            TARGET_SDK=$(grep -oP 'targetSdk(Version)?\s+\K\d+' android/app/build.gradle | head -1)
-            if [ -n "$TARGET_SDK" ] && [ "$TARGET_SDK" -lt 34 ]; then
-              sed -i "s/targetSdk\(Version\)\?\s\+[0-9]\+/targetSdk 34/g" android/app/build.gradle
-              echo "✅ targetSdk dinaikkan ke 34"
-            fi
-            if grep -q "flutter\.targetSdkVersion" android/app/build.gradle; then
-              sed -i "s/flutter\.targetSdkVersion/34/g" android/app/build.gradle
-              echo "✅ flutter.targetSdkVersion diganti ke 34"
-            fi
-          fi
-
-          if [ -f android/app/build.gradle ]; then
-            MIN_SDK=$(grep -oP 'minSdk(Version)?\s+\K\d+' android/app/build.gradle | head -1)
-            if [ -n "$MIN_SDK" ] && [ "$MIN_SDK" -lt 21 ]; then
-              sed -i "s/minSdk\(Version\)\?\s\+[0-9]\+/minSdkVersion 21/g" android/app/build.gradle
-              echo "✅ minSdk dinaikkan ke 21"
-            fi
-            if grep -q "flutter\.minSdkVersion" android/app/build.gradle; then
-              sed -i "s/flutter\.minSdkVersion/21/g" android/app/build.gradle
-              echo "✅ flutter.minSdkVersion diganti ke 21"
-            fi
-          fi
-
-          if [ -f android/build.gradle ]; then
-            sed -i "s/com.android.tools.build:gradle:[0-9.]*/com.android.tools.build:gradle:8.1.0/g" android/build.gradle
-            echo "✅ AGP dipaksa ke 8.1.0"
-          fi
-
-          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then
-            sed -i "s|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.3-bin.zip|g" android/gradle/wrapper/gradle-wrapper.properties
-            echo "✅ Gradle wrapper dipaksa ke 8.3"
-          fi
-
-          if [ -f android/build.gradle ]; then
-            KOTLIN_VER=$(grep -oP "ext\.kotlin_version\s*=\s*['\"]?\K[0-9.]+" android/build.gradle | head -1)
-            if [ -n "$KOTLIN_VER" ]; then
-              MAJOR=$(echo "$KOTLIN_VER" | cut -d. -f1)
-              MINOR=$(echo "$KOTLIN_VER" | cut -d. -f2)
-              if [ "$MAJOR" -eq 1 ] && [ "$MINOR" -le 6 ]; then
-                sed -i "s/ext\.kotlin_version\s*=\s*['\"][^'\"]*['\"]/ext.kotlin_version = '1.9.0'/g" android/build.gradle
-                echo "✅ Kotlin dinaikkan dari $KOTLIN_VER ke 1.9.0"
-              fi
-            fi
-          fi
-
-          if [ -f android/settings.gradle ]; then
-            if grep -q "dev.flutter.flutter-plugin-loader" android/settings.gradle; then
-              sed -i 's/id "dev\.flutter\.flutter-plugin-loader"[^\n]*/id "dev.flutter.flutter-gradle-plugin" version "1.0.0" apply false/g' android/settings.gradle
-              echo "✅ Plugin ID deprecated diganti ke flutter-gradle-plugin"
-            fi
-            if ! grep -q "flutter.sdk" android/local.properties 2>/dev/null; then
-              FLUTTER_PATH=$(which flutter | sed 's|/bin/flutter||')
-              echo "flutter.sdk=$FLUTTER_PATH" >> android/local.properties
-              echo "✅ flutter.sdk ditambahkan ke local.properties"
-            fi
-          fi
-
-          GRADLE_PROPS="android/gradle.properties"
-          if [ -f "$GRADLE_PROPS" ]; then
-            for PROP_KEY in "android.useAndroidX" "android.enableJetifier" "org.gradle.daemon" "org.gradle.parallel" "org.gradle.caching" "org.gradle.workers.max" "kotlin.compiler.execution.strategy"; do
-              case "$PROP_KEY" in
-                "android.useAndroidX") PROP_VAL="true" ;;
-                "android.enableJetifier") PROP_VAL="false" ;;
-                "org.gradle.daemon") PROP_VAL="false" ;;
-                "org.gradle.parallel") PROP_VAL="true" ;;
-                "org.gradle.caching") PROP_VAL="true" ;;
-                "org.gradle.workers.max") PROP_VAL="2" ;;
-                "kotlin.compiler.execution.strategy") PROP_VAL="in-process" ;;
-              esac
-              if grep -q "^${PROP_KEY}=" "$GRADLE_PROPS"; then
-                sed -i "s|^${PROP_KEY}=.*|${PROP_KEY}=${PROP_VAL}|g" "$GRADLE_PROPS"
-              else
-                echo "${PROP_KEY}=${PROP_VAL}" >> "$GRADLE_PROPS"
-              fi
-            done
-            if grep -q "^org.gradle.jvmargs=" "$GRADLE_PROPS"; then
-              sed -i "s|^org.gradle.jvmargs=.*|org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m -XX:+UseParallelGC -Dfile.encoding=UTF-8|g" "$GRADLE_PROPS"
-            else
-              echo "org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m -XX:+UseParallelGC -Dfile.encoding=UTF-8" >> "$GRADLE_PROPS"
-            fi
-            echo "✅ gradle.properties diperbarui (Jetifier OFF, daemon OFF)"
-          else
-            mkdir -p android
-            printf '%s\n' \
-              "org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m -XX:+UseParallelGC -Dfile.encoding=UTF-8" \
-              "android.useAndroidX=true" \
-              "android.enableJetifier=false" \
-              "org.gradle.daemon=false" \
-              "org.gradle.parallel=true" \
-              "org.gradle.caching=true" \
-              "org.gradle.workers.max=2" \
-              "kotlin.compiler.execution.strategy=in-process" > android/gradle.properties
-            echo "✅ gradle.properties dibuat baru"
-          fi
-
-          if [ -f android/app/build.gradle ]; then
-            sed -i "s/minifyEnabled\s\+true/minifyEnabled false/g" android/app/build.gradle
-            sed -i "s/shrinkResources\s\+true/shrinkResources false/g" android/app/build.gradle
-            echo "✅ minify & shrinkResources dinonaktifkan"
-          fi
-
-          if [ -f android/app/build.gradle ]; then
-            if ! grep -q "lintOptions" android/app/build.gradle; then
-              sed -i "s/defaultConfig {/lintOptions {\n        checkReleaseBuilds false\n        abortOnError false\n    }\n    defaultConfig {/g" android/app/build.gradle
-              echo "✅ lintOptions ditambahkan"
-            fi
-          fi
-
-          echo "🔍 Memeriksa asset files..."
-          for IMG_DIR in assets images android/app/src/main/res; do
-            if [ -d "$IMG_DIR" ]; then
-              find "$IMG_DIR" -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.gif" -o -name "*.webp" \) | while read IMGFILE; do
-                FSIZE=$(stat -c%s "$IMGFILE" 2>/dev/null || echo 0)
-                if [ "$FSIZE" -lt 10 ]; then
-                  echo "⚠️ Hapus file corrupt (ukuran $FSIZE bytes): $IMGFILE"
-                  rm -f "$IMGFILE"
-                fi
-              done
-            fi
-          done
-
-          if [ -d android/app/src/main/res ]; then
-            find android/app/src/main/res -type f | while read RESFILE; do
-              DIRNAME=$(dirname "$RESFILE")
-              BASENAME=$(basename "$RESFILE")
-              NEWNAME=$(echo "$BASENAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.]*/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//')
-              if [ "$BASENAME" != "$NEWNAME" ]; then
-                mv "$RESFILE" "$DIRNAME/$NEWNAME" 2>/dev/null && echo "✅ Renamed: $BASENAME -> $NEWNAME"
-              fi
-            done
-          fi
-
-          find . -name "*.lock" -not -path "*/.git/*" -delete 2>/dev/null || true
-          echo "✅ Lock files dibersihkan"
-
-          rm -rf ~/.gradle/caches/transforms-3 ~/.gradle/caches/transforms-4 2>/dev/null || true
-          rm -rf ~/.gradle/caches/jars-8 ~/.gradle/caches/jars-9 ~/.gradle/caches/journal-1 2>/dev/null || true
-          echo "✅ Gradle cache dibersihkan"
-
       - name: Flutter Build APK
         if: ${{ inputs.project_type == 'flutter' }}
         working-directory: project
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.native=false -Dfile.encoding=UTF-8 -Xmx2048m -XX:MaxMetaspaceSize=512m -XX:+UseParallelGC"
-          _JAVA_OPTIONS: "-Xmx2048m -Dfile.encoding=UTF-8"
         run: |
           flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons
           echo "✅ Flutter build selesai"
@@ -313,11 +108,11 @@ jobs:
         if: ${{ inputs.project_type == 'gradle' }}
         working-directory: project
         run: |
-          chmod +x gradlew 2>/dev/null || chmod +x gradle.bat 2>/dev/null || true
+          chmod +x gradlew 2>/dev/null || true
           if [ "${{ inputs.build_type }}" = "debug" ]; then
-            ./gradlew assembleDebug --no-daemon --no-watch-fs --stacktrace
+            ./gradlew assembleDebug --no-daemon
           else
-            ./gradlew assembleRelease --no-daemon --no-watch-fs --stacktrace
+            ./gradlew assembleRelease --no-daemon
           fi
           echo "✅ Gradle build selesai"
 
@@ -327,11 +122,11 @@ jobs:
           APK_FILE=$(find project/build -name "*.apk" -type f | head -n 1)
 
           if [ -z "$APK_FILE" ]; then
-            echo "❌ Gagal: Tidak ada file APK yang ditemukan setelah build!"
+            echo "❌ Gagal: Tidak ada file APK yang ditemukan!"
             exit 1
           fi
 
-          echo "📝 APK mentah ditemukan di: $APK_FILE"
+          echo "📝 APK ditemukan di: $APK_FILE"
 
           if [ -n "${{ inputs.app_name }}" ]; then
             NAMA_AKHIR="${{ inputs.app_name }}-${{ inputs.build_type }}.apk"
@@ -339,13 +134,8 @@ jobs:
             NAMA_AKHIR="app-${{ inputs.build_type }}.apk"
           fi
 
-          echo "🔄 Mengubah nama file APK menjadi: $NAMA_AKHIR"
           mv "$APK_FILE" "final_apk/$NAMA_AKHIR"
-          echo "✅ Rename berhasil! Isi folder final_apk:"
-          ls -lh final_apk/
-          echo "BUILD_SUCCESS=true" >> $GITHUB_ENV
-          echo "APK_NAME=$NAMA_AKHIR" >> $GITHUB_ENV
-          echo "APK_SIZE=$(du -sh final_apk/$NAMA_AKHIR | cut -f1)" >> $GITHUB_ENV
+          echo "✅ APK siap: $NAMA_AKHIR"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
