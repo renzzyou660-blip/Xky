@@ -63,21 +63,28 @@ jobs:
           dirs=(temp_extract/*)
 
           if [ ${#dirs[@]} -eq 1 ] && [ -d "${dirs[0]}" ]; then
-            echo "📦 Terdeteksi 1 folder pembungkus, memindahkan isinya ke atas..."
+            echo "📦 Terdeteksi 1 folder pembungkus, memindahkan isinya ke project/"
             mv "${dirs[0]}"/* project/ 2>/dev/null
             mv "${dirs[0]}"/.* project/ 2>/dev/null || true
           else
-            echo "📦 Tidak ada folder pembungkus, memindahkan semua file..."
+            echo "📦 Tidak ada folder pembungkus, memindahkan semua file ke project/"
             mv temp_extract/* project/ 2>/dev/null
             mv temp_extract/.* project/ 2>/dev/null || true
           fi
           rm -rf temp_extract
 
-      - name: Verify Project
-        run: |
-          echo "Isi folder project:"
+          echo "📁 Isi folder project setelah ekstrak:"
           ls -la project/
 
+          if [ -f project/pubspec.yaml ]; then
+            echo "✅ pubspec.yaml ditemukan di root project"
+          else
+            echo "⚠️ pubspec.yaml tidak ditemukan di root, mencari di subfolder..."
+            find project -name "pubspec.yaml" -type f | head -5
+          fi
+
+      - name: Verify Project
+        run: |
           if [ "${{ inputs.project_type }}" = "flutter" ]; then
             if [ ! -f project/pubspec.yaml ]; then
               echo "❌ pubspec.yaml tidak ditemukan!"
@@ -97,12 +104,74 @@ jobs:
         working-directory: project
         run: flutter pub get
 
-      - name: Flutter Build APK
+      - name: Fix Android Gradle Compatibility
+        if: ${{ inputs.project_type == 'flutter' }}
+        working-directory: project
+        run: |
+          if [ -f android/gradlew ]; then
+            chmod +x android/gradlew
+          fi
+
+          if [ -f android/app/build.gradle ]; then
+            if ! grep -q "namespace" android/app/build.gradle; then
+              PKG=$(grep -oP 'package="\K[^"]+' android/app/src/main/AndroidManifest.xml 2>/dev/null || true)
+              if [ -n "$PKG" ]; then
+                sed -i "/^android {/a\\    namespace \"$PKG\"" android/app/build.gradle
+              fi
+            fi
+          fi
+
+          if [ -f android/app/build.gradle ]; then
+            sed -i "s/compileSdk\(Version\)\?\s\+[0-9]\+/compileSdk 34/g" android/app/build.gradle
+            sed -i "s/targetSdk\(Version\)\?\s\+[0-9]\+/targetSdk 34/g" android/app/build.gradle
+            sed -i "s/minSdk\(Version\)\?\s\+[0-9]\+/minSdkVersion 21/g" android/app/build.gradle
+            sed -i "s/flutter\.compileSdkVersion/34/g" android/app/build.gradle
+            sed -i "s/flutter\.targetSdkVersion/34/g" android/app/build.gradle
+            sed -i "s/flutter\.minSdkVersion/21/g" android/app/build.gradle
+          fi
+
+          if [ -f android/build.gradle ]; then
+            sed -i "s/com.android.tools.build:gradle:[0-9.]*/com.android.tools.build:gradle:8.1.0/g" android/build.gradle
+          fi
+
+          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then
+            sed -i "s|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.3-bin.zip|g" android/gradle/wrapper/gradle-wrapper.properties
+          fi
+
+          if [ -f android/build.gradle ]; then
+            KOTLIN_VER=$(grep -oP "ext\.kotlin_version\s*=\s*['\"]?\K[0-9.]+" android/build.gradle | head -1)
+            if [ -n "$KOTLIN_VER" ]; then
+              MAJOR=$(echo "$KOTLIN_VER" | cut -d. -f1)
+              MINOR=$(echo "$KOTLIN_VER" | cut -d. -f2)
+              if [ "$MAJOR" -eq 1 ] && [ "$MINOR" -le 6 ]; then
+                sed -i "s/ext\.kotlin_version\s*=\s*['\"][^'\"]*['\"]/ext.kotlin_version = '1.9.0'/g" android/build.gradle
+              fi
+            fi
+          fi
+
+          GRADLE_PROPS="android/gradle.properties"
+          if [ -f "$GRADLE_PROPS" ]; then
+            sed -i "s/android.enableJetifier=.*/android.enableJetifier=false/g" "$GRADLE_PROPS"
+            sed -i "s/org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m -XX:+UseParallelGC -Dfile.encoding=UTF-8/g" "$GRADLE_PROPS"
+          else
+            mkdir -p android
+            echo "android.enableJetifier=false" >> "$GRADLE_PROPS"
+            echo "org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m -XX:+UseParallelGC -Dfile.encoding=UTF-8" >> "$GRADLE_PROPS"
+          fi
+
+          if [ -f android/app/build.gradle ]; then
+            sed -i "s/minifyEnabled true/minifyEnabled false/g" android/app/build.gradle
+            sed -i "s/shrinkResources true/shrinkResources false/g" android/app/build.gradle
+          fi
+
+          echo "✅ Fix Gradle selesai"
+
+      - name: Build APK
         if: ${{ inputs.project_type == 'flutter' }}
         working-directory: project
         run: |
           flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons
-          echo "✅ Flutter build selesai"
+          echo "✅ Build APK selesai"
 
       - name: Gradle Build APK
         if: ${{ inputs.project_type == 'gradle' }}
@@ -136,6 +205,7 @@ jobs:
 
           mv "$APK_FILE" "final_apk/$NAMA_AKHIR"
           echo "✅ APK siap: $NAMA_AKHIR"
+          echo "APK_NAME=$NAMA_AKHIR" >> $GITHUB_ENV
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
