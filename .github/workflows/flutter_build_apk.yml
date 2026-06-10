@@ -54,11 +54,10 @@ jobs:
             "platforms;android-33" \
             "platforms;android-34" \
             "platforms;android-35" \
-            "platforms;android-36" \
             "build-tools;33.0.2" \
             "build-tools;34.0.0" \
             "build-tools;35.0.0" \
-            "build-tools;36.0.0"
+            "platforms;android-36"
 
       - name: Extract Project
         run: |
@@ -81,43 +80,6 @@ jobs:
           fi
           ls -la project/
 
-      - name: Auto-Fix Build Configuration
-        if: inputs.project_type == 'flutter'
-        working-directory: project
-        run: |
-          echo "🔧 MENERAPKAN AUTO-FIX..."
-          
-          if grep -q "font_awesome_flutter:" pubspec.yaml; then
-            sed -i 's/font_awesome_flutter: [^ ]*/font_awesome_flutter: 10.7.0/g' pubspec.yaml
-            echo "✅ Fixed font_awesome_flutter"
-          fi
-          
-          find android -name "build.gradle*" -type f | while read file; do
-            if grep -q "compileSdk" "$file"; then
-              sed -i 's/compileSdk = [0-9]\+/compileSdk = 36/g' "$file"
-              sed -i 's/compileSdkVersion [0-9]\+/compileSdkVersion 36/g' "$file"
-            fi
-            if grep -q "targetSdk" "$file"; then
-              sed -i 's/targetSdk = [0-9]\+/targetSdk = 36/g' "$file"
-              sed -i 's/targetSdkVersion [0-9]\+/targetSdkVersion 36/g' "$file"
-            fi
-          done
-          
-          if [ -f "android/gradle/wrapper/gradle-wrapper.properties" ]; then
-            sed -i 's|gradle-[0-9.]\+-all.zip|gradle-8.14-all.zip|g' android/gradle/wrapper/gradle-wrapper.properties
-          fi
-          
-          if ! grep -q "dependency_overrides:" pubspec.yaml; then
-            echo "" >> pubspec.yaml
-            echo "dependency_overrides:" >> pubspec.yaml
-            echo "  font_awesome_flutter: 10.7.0" >> pubspec.yaml
-          fi
-          
-          mkdir -p android
-          printf '%s\n' 'android.useAndroidX=true' 'android.enableJetifier=true' 'org.gradle.jvmargs=-Xmx4g' > android/gradle.properties
-          
-          echo "✅ Auto-fix selesai"
-
       - name: Flutter Doctor
         if: inputs.project_type == 'flutter'
         run: |
@@ -125,17 +87,38 @@ jobs:
           flutter precache --android
           flutter doctor -v
 
+      - name: AndroidX Fix
+        if: inputs.project_type == 'flutter'
+        working-directory: project
+        run: |
+          mkdir -p android
+          touch android/gradle.properties
+          grep -q "android.useAndroidX" android/gradle.properties || echo "android.useAndroidX=true" >> android/gradle.properties
+          grep -q "android.enableJetifier" android/gradle.properties || echo "android.enableJetifier=true" >> android/gradle.properties
+          if [ -f "android/app/build.gradle.kts" ]; then
+            sed -i 's/compileSdk = [0-9]*/compileSdk = 36/' android/app/build.gradle.kts
+            grep -q "compileSdk" android/app/build.gradle.kts || sed -i '/android {/a\    compileSdk = 36' android/app/build.gradle.kts
+          fi
+          if [ -f "android/app/build.gradle" ]; then
+            sed -i 's/compileSdkVersion [0-9]*/compileSdkVersion 36/' android/app/build.gradle
+            grep -q "compileSdkVersion" android/app/build.gradle || sed -i '/android {/a\    compileSdkVersion 36' android/app/build.gradle
+          fi
+
       - name: Clean Project
         if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
           flutter clean || true
-          rm -rf .dart_tool build pubspec.lock
+          rm -rf .dart_tool build
 
       - name: Pub Get
         if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
+          if grep -q "font_awesome_flutter" pubspec.yaml; then
+            sed -i 's/font_awesome_flutter: .*/font_awesome_flutter: ^10.9.0/' pubspec.yaml
+            flutter pub upgrade font_awesome_flutter || true
+          fi
           flutter pub get || (
             flutter pub cache repair
             flutter pub get
@@ -145,27 +128,58 @@ jobs:
         if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
-          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons
+          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons --android-skip-build-dependency-validation 2>&1 | tee ../build_output.log
 
-      - name: Retry Build with Fallback
+      - name: Retry Build (if failed)
         if: failure() && inputs.project_type == 'flutter'
         working-directory: project
         run: |
-          echo "🔄 Build gagal, coba dengan --no-sound-null-safety..."
           flutter clean
-          rm -rf pubspec.lock
           flutter pub get
-          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons --no-sound-null-safety
+          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons --android-skip-build-dependency-validation 2>&1 | tee -a ../build_output.log
+
+      - name: Build AAB as Fallback
+        if: failure() && inputs.project_type == 'flutter'
+        working-directory: project
+        run: |
+          flutter build appbundle --release 2>&1 | tee -a ../build_output.log
 
       - name: Find and Collect APK
         working-directory: project
         run: |
+          echo "🔍 Mencari semua file .apk di project..."
+          find . -name "*.apk" -type f
+          echo ""
+          echo "📁 Mencari folder build/outputs..."
+          find . -type d -path "*/build/outputs/*" | head -20
+          echo ""
           mkdir -p ../all_apks
-          find . -name "*.apk" -type f | while read apk; do
+          find . -name "*.apk" -type f | while IFS= read -r apk; do
             cp "$apk" ../all_apks/
           done
           echo "✅ APK yang ditemukan:"
-          ls -la ../all_apks/ || echo "Tidak ada APK"
+          ls -la ../all_apks/
+
+      - name: Collect Error Logs
+        if: failure()
+        run: |
+          mkdir -p error_logs
+          if [ -f "build_output.log" ]; then
+            cp build_output.log error_logs/build_error.log
+          fi
+          if [ -d "project" ]; then
+            find project -name "*.log" -exec cp {} error_logs/ \; 2>/dev/null || true
+          fi
+          if [ -d "project/android" ]; then
+            find project/android -name "*.log" -exec cp {} error_logs/ \; 2>/dev/null || true
+          fi
+          echo "=== BUILD FAILURE SUMMARY ===" > error_logs/summary.txt
+          echo "Job ID: ${{ inputs.job_id }}" >> error_logs/summary.txt
+          echo "Build Type: ${{ inputs.build_type }}" >> error_logs/summary.txt
+          echo "Timestamp: $(date)" >> error_logs/summary.txt
+          echo "" >> error_logs/summary.txt
+          echo "Last 50 lines of build output:" >> error_logs/summary.txt
+          tail -50 build_output.log >> error_logs/summary.txt 2>/dev/null || echo "No log available" >> error_logs/summary.txt
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -174,10 +188,10 @@ jobs:
           path: all_apks/*.apk
           if-no-files-found: warn
 
-      - name: Upload Error Logs
+      - name: Upload Error Log Artifact
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: error-${{ inputs.job_id }}
-          path: build_output.log
+          path: error_logs/
           if-no-files-found: ignore
