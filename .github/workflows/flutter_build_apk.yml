@@ -105,16 +105,21 @@ jobs:
         if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
-          set -e
-
           flutter build apk \
             --${{ inputs.build_type }} \
             --no-tree-shake-icons \
             2>&1 | tee ../build_output.log
 
           echo ""
-          echo "📦 APK Generated:"
-          find build -name "*.apk" -type f || true
+          echo "📦 Mencari APK setelah build..."
+          find . -name "*.apk" -type f || echo "❌ TIDAK ADA APK!"
+          
+          APK_COUNT=$(find . -name "*.apk" -type f | wc -l)
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "❌❌❌ BUILD GAGAL: Tidak menghasilkan APK! ❌❌❌"
+            echo "Cek log di atas untuk detail error Flutter."
+            exit 1
+          fi
 
       - name: Debug Build Outputs
         if: always()
@@ -170,28 +175,39 @@ jobs:
         run: |
           mkdir -p apk_artifact
 
-          echo "🔍 Mencari semua APK..."
-
-          find project -name "*.apk" -type f | while read APK; do
-            echo "APK ditemukan: $APK"
+          echo "🔍 Mencari APK di SELURUH folder (bukan hanya project/)..."
+          
+          find . -name "*.apk" -type f 2>/dev/null | while read APK; do
+            echo "✅ APK ditemukan di: $APK"
             cp "$APK" apk_artifact/
           done
 
-          echo ""
-          echo "📦 Isi folder artifact:"
-          ls -lah apk_artifact || true
-
-          APK_COUNT=$(find apk_artifact -name "*.apk" | wc -l)
-
-          echo "APK_COUNT=$APK_COUNT"
-
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "❌ Tidak ada APK ditemukan"
+          if [ -z "$(ls -A apk_artifact 2>/dev/null)" ]; then
+            echo "⚠️ APK tidak ditemukan dengan find biasa, coba cek struktur folder..."
+            
             echo ""
-            echo "📂 Isi folder build:"
-            find project/build -type f 2>/dev/null || true
+            echo "📂 Isi folder project/build (recursive):"
+            find project/build -type f 2>/dev/null | head -50 || echo "Folder build tidak ada"
+            
+            echo ""
+            echo "📂 Isi folder project (seluruhnya, cari file .apk):"
+            find project -type f -name "*.apk" 2>/dev/null || echo "Tidak ada APK di project"
+            
+            echo ""
+            echo "📂 Isi folder root (tempat unzip):"
+            find . -maxdepth 2 -type f -name "*.apk" 2>/dev/null || echo "Tidak ada APK di root"
+            
+            echo ""
+            echo "❌ APK TIDAK DITEMUKAN! Workflow akan gagal."
             exit 1
           fi
+
+          echo ""
+          echo "📦 Isi folder artifact:"
+          ls -lah apk_artifact/
+
+          APK_COUNT=$(find apk_artifact -name "*.apk" | wc -l)
+          echo "Total APK ditemukan: $APK_COUNT"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
