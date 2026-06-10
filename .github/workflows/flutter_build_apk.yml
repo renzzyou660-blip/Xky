@@ -125,19 +125,15 @@ jobs:
         if: failure()
         run: |
           mkdir -p error_logs
-          # Copy build output log
           if [ -f "build_output.log" ]; then
             cp build_output.log error_logs/build_error.log
           fi
-          # Copy flutter logs
           if [ -d "project" ]; then
             find project -name "*.log" -exec cp {} error_logs/ \; 2>/dev/null || true
           fi
-          # Copy gradle logs
           if [ -d "project/android" ]; then
             find project/android -name "*.log" -exec cp {} error_logs/ \; 2>/dev/null || true
           fi
-          # Create summary error
           echo "=== BUILD FAILURE SUMMARY ===" > error_logs/summary.txt
           echo "Job ID: ${{ inputs.job_id }}" >> error_logs/summary.txt
           echo "Build Type: ${{ inputs.build_type }}" >> error_logs/summary.txt
@@ -151,10 +147,10 @@ jobs:
         with:
           name: apk-${{ inputs.job_id }}
           path: |
-            project/build/app/outputs/flutter-apk/*.apk
-            project/build/app/outputs/apk/*/*.apk
+            project/build/app/outputs/apk/release/*.apk
+            project/build/app/outputs/apk/debug/*.apk
             project/build/app/outputs/bundle/release/*.aab
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Upload Error Log Artifact
         if: failure()
