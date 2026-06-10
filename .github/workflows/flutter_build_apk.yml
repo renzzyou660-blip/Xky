@@ -1,4 +1,4 @@
-name: Flutter Build APK Pro
+name: Flutter Build APK Pro (Adaptive)
 
 on:
   workflow_dispatch:
@@ -28,41 +28,23 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Setup Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-
       - name: Setup Gradle Cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Setup Flutter
-        if: inputs.project_type == 'flutter'
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-
       - name: Setup Android SDK
-        if: inputs.project_type == 'flutter'
         uses: android-actions/setup-android@v3
 
       - name: Install Android Components
-        if: inputs.project_type == 'flutter'
         run: |
           yes | sdkmanager --licenses
           sdkmanager \
             "platform-tools" \
-            "platforms;android-33" \
             "platforms;android-34" \
             "platforms;android-35" \
             "platforms;android-36" \
-            "build-tools;33.0.2" \
             "build-tools;34.0.0" \
             "build-tools;35.0.0" \
-            "build-tools;36.0.0" \
-            "ndk;27.0.12077973"
+            "build-tools;36.0.0"
 
       - name: Extract Project
         run: |
@@ -86,6 +68,127 @@ jobs:
           fi
           ls -la project/
 
+      - name: Detect AGP Version (for Java selection)
+        id: detect_agp
+        run: |
+          AGP_VER=""
+          if [ -f "project/android/build.gradle" ]; then
+            AGP_VER=$(grep -oE 'com.android.tools.build:gradle:[0-9.]+' project/android/build.gradle | grep -oE '[0-9.]+$' | head -1)
+          fi
+          if [ -z "$AGP_VER" ] && [ -f "project/android/build.gradle.kts" ]; then
+            AGP_VER=$(grep -A2 'id("com.android.application")' project/android/build.gradle.kts | grep -oE 'version[ ="]+[0-9.]+' | grep -oE '[0-9.]+' | head -1)
+          fi
+          if [ -z "$AGP_VER" ] && [ -f "project/android/settings.gradle" ]; then
+            AGP_VER=$(grep -oE "classpath['\"]?[ :]+['\"]com.android.tools.build:gradle:[0-9.]+['\"]" project/android/settings.gradle | grep -oE '[0-9.]+' | head -1)
+          fi
+          if [ -z "$AGP_VER" ] && [ -f "project/android/settings.gradle" ]; then
+            AGP_VER=$(grep -oE 'id\("com\.android\.application"\) version "[0-9.]+"' project/android/settings.gradle | grep -oE '[0-9.]+' | head -1)
+          fi
+          if [ -z "$AGP_VER" ] && [ -f "project/android/settings.gradle.kts" ]; then
+            AGP_VER=$(grep -oE 'id\("com\.android\.application"\) version "[0-9.]+"' project/android/settings.gradle.kts | grep -oE '[0-9.]+' | head -1)
+          fi
+          if [ -z "$AGP_VER" ] && [ -f "project/android/gradle/libs.versions.toml" ]; then
+            AGP_VER=$(grep -oE 'android-gradle-plugin[[:space:]]*=[[:space:]]*"[0-9.]+"' project/android/gradle/libs.versions.toml | grep -oE '[0-9.]+' | head -1)
+          fi
+          
+          if [ -n "$AGP_VER" ]; then
+            AGP_MAJOR=$(echo "$AGP_VER" | cut -d. -f1)
+            AGP_MINOR=$(echo "$AGP_VER" | cut -d. -f2)
+            echo "agp_version=$AGP_VER" >> $GITHUB_OUTPUT
+            echo "agp_major=$AGP_MAJOR" >> $GITHUB_OUTPUT
+            echo "agp_minor=$AGP_MINOR" >> $GITHUB_OUTPUT
+            echo "✅ Detected AGP version: $AGP_VER (major: $AGP_MAJOR, minor: $AGP_MINOR)"
+            
+            if [ "$AGP_MAJOR" -ge 9 ]; then
+              echo "java_version=21" >> $GITHUB_OUTPUT
+              echo "✅ Using Java 21 for AGP $AGP_MAJOR"
+            elif [ "$AGP_MAJOR" -eq 8 ] && [ "$AGP_MINOR" -ge 5 ]; then
+              echo "java_version=21" >> $GITHUB_OUTPUT
+              echo "✅ Using Java 21 for AGP $AGP_VER"
+            elif [ "$AGP_MAJOR" -ge 8 ]; then
+              echo "java_version=17" >> $GITHUB_OUTPUT
+              echo "✅ Using Java 17 for AGP $AGP_MAJOR"
+            else
+              echo "java_version=11" >> $GITHUB_OUTPUT
+              echo "✅ Using Java 11 for AGP $AGP_MAJOR"
+            fi
+          else
+            echo "agp_version=unknown" >> $GITHUB_OUTPUT
+            echo "java_version=17" >> $GITHUB_OUTPUT
+            echo "⚠️ No AGP version detected, using Java 17"
+          fi
+
+      - name: Check Gradle Version
+        id: check_gradle
+        run: |
+          if [ -f "project/android/gradle/wrapper/gradle-wrapper.properties" ]; then
+            GRADLE_VER=$(grep -oE 'gradle-[0-9.]+-bin.zip' project/android/gradle/wrapper/gradle-wrapper.properties | grep -oE '[0-9.]+' | head -1)
+            echo "gradle_version=$GRADLE_VER" >> $GITHUB_OUTPUT
+            echo "✅ Detected Gradle version: $GRADLE_VER"
+            
+            AGP_VER="${{ steps.detect_agp.outputs.agp_version }}"
+            if [ -n "$AGP_VER" ] && [ -n "$GRADLE_VER" ]; then
+              AGP_MAJOR=$(echo "$AGP_VER" | cut -d. -f1)
+              GRADLE_MAJOR=$(echo "$GRADLE_VER" | cut -d. -f1)
+              if [ "$AGP_MAJOR" -ge 8 ] && [ "$GRADLE_MAJOR" -lt 8 ]; then
+                echo "⚠️ WARNING: AGP $AGP_VER requires Gradle 8.0+, but found $GRADLE_VER"
+                echo "⚠️ This may cause build failures"
+              fi
+            fi
+          else
+            echo "gradle_version=unknown" >> $GITHUB_OUTPUT
+            echo "⚠️ gradle-wrapper.properties not found"
+          fi
+
+      - name: Setup Java (based on AGP version)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ steps.detect_agp.outputs.java_version }}
+
+      - name: Detect Flutter Version from Project
+        id: detect_flutter
+        run: |
+          FLUTTER_VER=""
+          if [ -f "project/.fvm/fvm_config.json" ]; then
+            FLUTTER_VER=$(grep -oE '"flutterSdkVersion":"[^"]*"' project/.fvm/fvm_config.json | cut -d'"' -f4)
+          fi
+          if [ -z "$FLUTTER_VER" ] && [ -f "project/.fvmrc" ]; then
+            FLUTTER_VER=$(grep -oE '"flutter"[[:space:]]*:[[:space:]]*"[^"]+"' project/.fvmrc | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          fi
+          if [ -z "$FLUTTER_VER" ] && [ -f "project/.flutter-version" ]; then
+            FLUTTER_VER=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' project/.flutter-version | head -1)
+          fi
+          if [ -z "$FLUTTER_VER" ] && [ -f "project/pubspec.yaml" ]; then
+            DART_VER=$(grep -oE 'sdk:[[:space:]]*">=[0-9.]+\.[0-9]+\.[0-9]+' project/pubspec.yaml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            if [ -n "$DART_VER" ]; then
+              DART_MAJOR=$(echo "$DART_VER" | cut -d. -f1)
+              DART_MINOR=$(echo "$DART_VER" | cut -d. -f2)
+              if [ "$DART_MAJOR" -ge 3 ] && [ "$DART_MINOR" -ge 7 ]; then
+                FLUTTER_VER="3.29.0"
+              elif [ "$DART_MAJOR" -ge 3 ] && [ "$DART_MINOR" -ge 6 ]; then
+                FLUTTER_VER="3.27.0"
+              elif [ "$DART_MAJOR" -ge 3 ] && [ "$DART_MINOR" -ge 5 ]; then
+                FLUTTER_VER="3.24.0"
+              elif [ "$DART_MAJOR" -ge 3 ] && [ "$DART_MINOR" -ge 4 ]; then
+                FLUTTER_VER="3.22.0"
+              elif [ "$DART_MAJOR" -ge 3 ] && [ "$DART_MINOR" -ge 3 ]; then
+                FLUTTER_VER="3.19.0"
+              elif [ "$DART_MAJOR" -ge 3 ] && [ "$DART_MINOR" -ge 0 ]; then
+                FLUTTER_VER="3.10.0"
+              fi
+              echo "✅ Mapped Dart SDK $DART_VER → Flutter $FLUTTER_VER"
+            fi
+          fi
+          
+          if [ -n "$FLUTTER_VER" ]; then
+            echo "version=$FLUTTER_VER" >> $GITHUB_OUTPUT
+            echo "✅ Detected Flutter version: $FLUTTER_VER"
+          else
+            echo "version=stable" >> $GITHUB_OUTPUT
+            echo "⚠️ No specific Flutter version detected, using stable"
+          fi
+
       - name: Cache Pub
         uses: actions/cache@v4
         with:
@@ -94,20 +197,95 @@ jobs:
           restore-keys: |
             flutter-pub-${{ runner.os }}-
 
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.detect_flutter.outputs.version }}
+          cache: true
+
       - name: Fix Gradle Permission
         working-directory: project
         run: |
           chmod +x android/gradlew 2>/dev/null || true
 
+      - name: Safe Auto Fix compileSdk & targetSdk (only safe numeric values to 34)
+        working-directory: project
+        run: |
+          TARGET_SDK=34
+          if [ -f "android/app/build.gradle" ]; then
+            if grep -q "compileSdkVersion [0-9][0-9]*" android/app/build.gradle; then
+              CURRENT_COMPILE=$(grep -o 'compileSdkVersion [0-9]*' android/app/build.gradle | head -1 | grep -o '[0-9]*')
+              if [ -n "$CURRENT_COMPILE" ] && [ "$CURRENT_COMPILE" -lt $TARGET_SDK ]; then
+                sed -i "s/compileSdkVersion $CURRENT_COMPILE/compileSdkVersion $TARGET_SDK/" android/app/build.gradle
+                echo "✅ compileSdkVersion updated from $CURRENT_COMPILE to $TARGET_SDK"
+              else
+                echo "✅ compileSdkVersion already >= $TARGET_SDK or not numeric"
+              fi
+            else
+              echo "⚠️ compileSdkVersion uses variable, skipping auto-upgrade"
+            fi
+            
+            if grep -q "targetSdkVersion [0-9][0-9]*" android/app/build.gradle; then
+              CURRENT_TARGET=$(grep -o 'targetSdkVersion [0-9]*' android/app/build.gradle | head -1 | grep -o '[0-9]*')
+              if [ -n "$CURRENT_TARGET" ] && [ "$CURRENT_TARGET" -lt $TARGET_SDK ]; then
+                sed -i "s/targetSdkVersion $CURRENT_TARGET/targetSdkVersion $TARGET_SDK/" android/app/build.gradle
+                echo "✅ targetSdkVersion updated from $CURRENT_TARGET to $TARGET_SDK"
+              fi
+            else
+              echo "⚠️ targetSdkVersion uses variable, skipping auto-upgrade"
+            fi
+          fi
+          
+          if [ -f "android/app/build.gradle.kts" ]; then
+            if grep -q "compileSdk = [0-9][0-9]*" android/app/build.gradle.kts; then
+              CURRENT_COMPILE=$(grep -o 'compileSdk = [0-9]*' android/app/build.gradle.kts | head -1 | grep -o '[0-9]*')
+              if [ -n "$CURRENT_COMPILE" ] && [ "$CURRENT_COMPILE" -lt $TARGET_SDK ]; then
+                sed -i "s/compileSdk = $CURRENT_COMPILE/compileSdk = $TARGET_SDK/" android/app/build.gradle.kts
+                echo "✅ compileSdk updated from $CURRENT_COMPILE to $TARGET_SDK"
+              fi
+            else
+              echo "⚠️ compileSdk uses variable, skipping auto-upgrade"
+            fi
+            
+            if grep -q "targetSdk = [0-9][0-9]*" android/app/build.gradle.kts; then
+              CURRENT_TARGET=$(grep -o 'targetSdk = [0-9]*' android/app/build.gradle.kts | head -1 | grep -o '[0-9]*')
+              if [ -n "$CURRENT_TARGET" ] && [ "$CURRENT_TARGET" -lt $TARGET_SDK ]; then
+                sed -i "s/targetSdk = $CURRENT_TARGET/targetSdk = $TARGET_SDK/" android/app/build.gradle.kts
+                echo "✅ targetSdk updated from $CURRENT_TARGET to $TARGET_SDK"
+              fi
+            else
+              echo "⚠️ targetSdk uses variable, skipping auto-upgrade"
+            fi
+          fi
+
+      - name: Diagnostic - Flutter & Dependency Info
+        run: |
+          echo "===== FLUTTER VERSION ====="
+          flutter --version
+          echo ""
+          echo "===== PUBSPEC.YAML ====="
+          cat project/pubspec.yaml || echo "pubspec.yaml not found"
+          echo ""
+          echo "===== DEPENDENCIES TREE ====="
+          cd project && flutter pub deps || echo "Failed to get dependencies"
+          echo ""
+          echo "===== DART SDK CONSTRAINT ====="
+          grep -E "sdk:.*[0-9]" project/pubspec.yaml 2>/dev/null || echo "No SDK constraint found"
+          echo ""
+          echo "===== GRADLE VERSION ====="
+          if [ -f "project/android/gradle/wrapper/gradle-wrapper.properties" ]; then
+            cat project/android/gradle/wrapper/gradle-wrapper.properties | grep "gradle-" || echo "Not found"
+          else
+            echo "gradle-wrapper.properties not found"
+          fi
+
       - name: Flutter Doctor
-        if: inputs.project_type == 'flutter'
         run: |
           flutter config --no-analytics
           flutter precache --android
           flutter doctor -v
 
       - name: AndroidX Fix
-        if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
           mkdir -p android
@@ -116,14 +294,12 @@ jobs:
           grep -q "android.enableJetifier" android/gradle.properties || echo "android.enableJetifier=true" >> android/gradle.properties
 
       - name: Clean Project
-        if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
           flutter clean || true
           rm -rf .dart_tool build
 
       - name: Pub Get
-        if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
           flutter pub get || (
@@ -131,144 +307,225 @@ jobs:
             flutter pub get
           )
 
-      - name: Build APK
-        if: inputs.project_type == 'flutter'
+      - name: Check Outdated Dependencies
         working-directory: project
         run: |
-          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons 2>&1 | tee ../build_output.log || (
-            flutter clean
-            flutter pub get || true
-            flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons 2>&1 | tee -a ../build_output.log || (
-              flutter pub cache repair || true
-              flutter pub get
-              flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons 2>&1 | tee -a ../build_output.log
+          echo "===== OUTDATED DEPENDENCIES ====="
+          flutter pub outdated || echo "Failed to check outdated dependencies"
+
+      - name: Build APK (Verbose Log, Multiple Attempts)
+        working-directory: project
+        run: |
+          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons --verbose 2>&1 | tee ../build_output.log || (
+            flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons --android-skip-build-dependency-validation --verbose 2>&1 | tee -a ../build_output.log || (
+              flutter clean
+              flutter pub get || true
+              flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons --verbose 2>&1 | tee -a ../build_output.log || (
+                flutter pub cache repair
+                flutter pub get
+                flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons --verbose 2>&1 | tee -a ../build_output.log
+              )
             )
           )
 
+      - name: Fallback Java 17 (if build failed with Java 21)
+        if: failure()
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Retry Build with Java 17
+        if: failure()
+        working-directory: project
+        run: |
+          echo "⚠️ Retrying build with Java 17 fallback..."
+          flutter clean || true
+          flutter pub get || true
+          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons --verbose 2>&1 | tee -a ../build_output.log || true
+
+      - name: Detect Common Package Issues
+        if: failure()
+        run: |
+          if grep -q "font_awesome_flutter" build_output.log; then
+            echo "FONT_AWESOME_ERROR=true" >> $GITHUB_ENV
+            echo "❌❌❌ FONT_AWESOME_COMPATIBILITY_ERROR ❌❌❌" >> $GITHUB_STEP_SUMMARY
+            echo "The project uses font_awesome_flutter which is incompatible with the current Flutter version." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**SOLUTION:**" >> $GITHUB_STEP_SUMMARY
+            echo "1. Update font_awesome_flutter to latest: \`flutter pub add font_awesome_flutter\`" >> $GITHUB_STEP_SUMMARY
+            echo "2. Or downgrade Flutter version to match the package" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if grep -q "webview_flutter" build_output.log; then
+            echo "WEBVIEW_ERROR=true" >> $GITHUB_ENV
+            echo "❌❌❌ WEBVIEW_FLUTTER_COMPATIBILITY_ERROR ❌❌❌" >> $GITHUB_STEP_SUMMARY
+            echo "webview_flutter has compatibility issues with current Flutter." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**SOLUTION:** Update webview_flutter: \`flutter pub add webview_flutter:^4.8.0\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if grep -q "flutter_html" build_output.log; then
+            echo "FLUTTER_HTML_ERROR=true" >> $GITHUB_ENV
+            echo "❌❌❌ FLUTTER_HTML_COMPATIBILITY_ERROR ❌❌❌" >> $GITHUB_STEP_SUMMARY
+            echo "flutter_html has compatibility issues with current Flutter." >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if grep -q "youtube_player_flutter" build_output.log; then
+            echo "YOUTUBE_PLAYER_ERROR=true" >> $GITHUB_ENV
+            echo "❌❌❌ YOUTUBE_PLAYER_FLUTTER_ERROR ❌❌❌" >> $GITHUB_STEP_SUMMARY
+            echo "youtube_player_flutter has compatibility issues." >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if grep -q "flutter_inappwebview" build_output.log; then
+            echo "INAPPWEBVIEW_ERROR=true" >> $GITHUB_ENV
+            echo "❌❌❌ FLUTTER_INAPPWEBVIEW_ERROR ❌❌❌" >> $GITHUB_STEP_SUMMARY
+            echo "flutter_inappwebview has compatibility issues." >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if grep -q "cached_network_image" build_output.log; then
+            echo "CACHED_IMAGE_ERROR=true" >> $GITHUB_ENV
+            echo "❌❌❌ CACHED_NETWORK_IMAGE_ERROR ❌❌❌" >> $GITHUB_STEP_SUMMARY
+            echo "cached_network_image has compatibility issues." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Analyze Build Error (Specific Package Issues)
+        if: failure()
+        run: |
+          echo "===== ANALYZING ERROR ====="
+          
+          if [ "$FONT_AWESOME_ERROR" = "true" ]; then
+            echo "❌ FONT_AWESOME_FLUTTER COMPATIBILITY ISSUE (Known)"
+            grep -B5 -A5 "font_awesome_flutter" build_output.log || true
+          fi
+          
+          if [ "$WEBVIEW_ERROR" = "true" ]; then
+            echo "❌ WEBVIEW_FLUTTER COMPATIBILITY ISSUE"
+            grep -B5 -A5 "webview_flutter" build_output.log || true
+          fi
+          
+          if [ "$FLUTTER_HTML_ERROR" = "true" ]; then
+            echo "❌ FLUTTER_HTML COMPATIBILITY ISSUE"
+            grep -B5 -A5 "flutter_html" build_output.log || true
+          fi
+          
+          if grep -q "IconData" build_output.log; then
+            echo "❌ DETECTED: IconData class compatibility issue"
+            echo "🔧 SOLUTION: Update Flutter or update package that uses IconData"
+            grep -B5 -A5 "IconData" build_output.log || true
+          fi
+          
+          if grep -q "requires null safety" build_output.log; then
+            echo "❌ DETECTED: Null safety migration needed"
+            echo "🔧 SOLUTION: Run 'dart pub upgrade --null-safety' or migrate project"
+          fi
+          
+          if grep -q "version solving failed" build_output.log; then
+            echo "❌ DETECTED: Dependency version conflict"
+            echo "🔧 SOLUTION: Check pubspec.yaml for version constraints"
+          fi
+          
+          if grep -q "is not a valid concrete version" build_output.log; then
+            echo "❌ DETECTED: Dart SDK version constraint mismatch"
+            echo "🔧 SOLUTION: Update environment.sdk in pubspec.yaml"
+          fi
+
       - name: Build AAB as Fallback
-        if: failure() && inputs.project_type == 'flutter'
+        if: failure()
         working-directory: project
         run: |
-          flutter build appbundle --release 2>&1 | tee -a ../build_output.log
+          echo "⚠️ Trying AAB build..."
+          flutter build appbundle --release --verbose 2>&1 | tee -a ../build_output.log || true
 
-      - name: Verify APK or AAB Exists
-        working-directory: project
+      - name: Auto Detect and Collect All APK/AAB/Logs
+        id: collect
         run: |
-          echo "=== APK FILES ==="
-          find . -name "*.apk" -type f
+          mkdir -p all_outputs
+          
+          # Cari di project/build dulu (lebih cepat)
+          find project/build -name "*.apk" -type f 2>/dev/null | while read f; do
+            BASENAME=$(basename "$f")
+            UNIQUE="${BASENAME%.*}_$(date +%s)_$RANDOM.${BASENAME##*.}"
+            echo "✅ APK found: $f"
+            cp "$f" "all_outputs/$UNIQUE" 2>/dev/null || cp "$f" "all_outputs/$BASENAME" 2>/dev/null || true
+          done
+          
+          # Cari global
+          find . -name "*.apk" -type f 2>/dev/null | while read f; do
+            BASENAME=$(basename "$f")
+            UNIQUE="${BASENAME%.*}_$(date +%s)_$RANDOM.${BASENAME##*.}"
+            echo "✅ APK found: $f"
+            cp "$f" "all_outputs/$UNIQUE" 2>/dev/null || cp "$f" "all_outputs/$BASENAME" 2>/dev/null || true
+          done
+          
+          find . -name "*.aab" -type f 2>/dev/null | while read f; do
+            BASENAME=$(basename "$f")
+            UNIQUE="${BASENAME%.*}_$(date +%s)_$RANDOM.${BASENAME##*.}"
+            echo "✅ AAB found: $f"
+            cp "$f" "all_outputs/$UNIQUE" 2>/dev/null || cp "$f" "all_outputs/$BASENAME" 2>/dev/null || true
+          done
+          
+          find . -name "mapping.txt" -type f 2>/dev/null | while read f; do
+            BASENAME=$(basename "$f")
+            echo "✅ mapping.txt found: $f"
+            cp "$f" "all_outputs/${BASENAME%.*}_$RANDOM.txt" 2>/dev/null || cp "$f" all_outputs/ 2>/dev/null || true
+          done
+          
+          if [ -f "build_output.log" ]; then
+            cp build_output.log all_outputs/full_build.log
+          fi
+          
+          echo "=== OUTPUTS ==="
+          ls -lah all_outputs/
 
-          echo "=== AAB FILES ==="
-          find . -name "*.aab" -type f
-
-          APK_COUNT=$(find . -name "*.apk" -type f | wc -l)
-          AAB_COUNT=$(find . -name "*.aab" -type f | wc -l)
+      - name: Verify and Report Build Status
+        run: |
+          APK_COUNT=$(find all_outputs -name "*.apk" | wc -l)
+          AAB_COUNT=$(find all_outputs -name "*.aab" | wc -l)
 
           echo "APK_COUNT=$APK_COUNT"
           echo "AAB_COUNT=$AAB_COUNT"
 
           if [ "$APK_COUNT" -eq 0 ] && [ "$AAB_COUNT" -eq 0 ]; then
-            echo "APK dan AAB tidak ditemukan setelah build"
+            echo "BUILD_FAILED=true" >> $GITHUB_ENV
+            echo "❌ No APK or AAB generated!" >> $GITHUB_STEP_SUMMARY
+            echo "📋 Check logs above for specific errors." >> $GITHUB_STEP_SUMMARY
             exit 1
+          else
+            echo "BUILD_FAILED=false" >> $GITHUB_ENV
+            echo "✅ Build successful!" >> $GITHUB_STEP_SUMMARY
+            echo "APK count: $APK_COUNT" >> $GITHUB_STEP_SUMMARY
+            echo "AAB count: $AAB_COUNT" >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Find and Collect APK
-        working-directory: project
-        run: |
-          echo "🔍 Mencari semua file .apk di project..."
-          find . -name "*.apk" -type f
-          echo ""
-          echo "📁 Mencari folder build/outputs..."
-          find . -type d -path "*/build/outputs/*" | head -20
-          echo ""
-          mkdir -p ../all_apks
-          find . -name "*.apk" -type f | while IFS= read -r apk; do
-            cp "$apk" ../all_apks/
-          done
-          echo "✅ APK yang ditemukan:"
-          ls -la ../all_apks/
+      - name: Upload All Outputs (APK, AAB, Logs, Mapping)
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ inputs.job_id }}
+          path: all_outputs/
+          if-no-files-found: ignore
+          retention-days: 7
 
-      - name: Collect Error Logs
-        if: failure()
-        run: |
-          mkdir -p error_logs
-          if [ -f "build_output.log" ]; then
-            cp build_output.log error_logs/build_error.log
-          fi
-          if [ -d "project" ]; then
-            find project -name "*.log" -exec cp {} error_logs/ \; 2>/dev/null || true
-          fi
-          if [ -d "project/android" ]; then
-            find project/android -name "*.log" -exec cp {} error_logs/ \; 2>/dev/null || true
-          fi
-          echo "=== BUILD FAILURE SUMMARY ===" > error_logs/summary.txt
-          echo "Job ID: ${{ inputs.job_id }}" >> error_logs/summary.txt
-          echo "Build Type: ${{ inputs.build_type }}" >> error_logs/summary.txt
-          echo "Timestamp: $(date)" >> error_logs/summary.txt
-          echo "" >> error_logs/summary.txt
-          echo "Last 50 lines of build output:" >> error_logs/summary.txt
-          tail -50 build_output.log >> error_logs/summary.txt 2>/dev/null || echo "No log available" >> error_logs/summary.txt
-
-      - name: Debug APK Before Upload
-        run: |
-          echo "===== SEMUA APK ====="
-          find . -name "*.apk" -type f
-
-          echo ""
-          echo "===== FOLDER all_apks ====="
-          ls -lah all_apks || true
-
-          echo ""
-          echo "===== BUILD OUTPUT ====="
-          find project/build -name "*.apk" -type f || true
-
-      - name: Debug Flutter Outputs
-        run: |
-          echo "=== flutter-apk ==="
-          find project/build/app/outputs/flutter-apk -type f 2>/dev/null || true
-
-          echo "=== outputs/apk ==="
-          find project -path "*/outputs/apk/*" -type f 2>/dev/null || true
-
-          echo "=== outputs/bundle ==="
-          find project -path "*/outputs/bundle/*" -type f 2>/dev/null || true
-
-      - name: Collect APK
-        run: |
-          mkdir -p apk_artifact
-
-          APK_LIST=$(find project -name "*.apk" -type f)
-
-          echo "$APK_LIST"
-
-          for apk in $APK_LIST; do
-            cp "$apk" apk_artifact/
-          done
-
-          echo "Isi apk_artifact:"
-          ls -lah apk_artifact
-
-      - name: Upload APK
+      - name: Upload Separate APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ inputs.job_id }}
-          path: |
-            apk_artifact/
-            project/build/app/outputs/flutter-apk/*.apk
-            project/**/outputs/apk/**/*.apk
+          path: all_outputs/*.apk
           if-no-files-found: ignore
 
-      - name: Upload AAB
+      - name: Upload Separate AAB Artifact
         uses: actions/upload-artifact@v4
         with:
           name: aab-${{ inputs.job_id }}
-          path: |
-            project/**/*.aab
+          path: all_outputs/*.aab
           if-no-files-found: ignore
 
-      - name: Upload Error Log Artifact
+      - name: Upload Error Logs (if failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: error-${{ inputs.job_id }}
-          path: error_logs/
+          path: |
+            all_outputs/full_build.log
+            build_output.log
           if-no-files-found: ignore
