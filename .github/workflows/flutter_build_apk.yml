@@ -141,7 +141,9 @@ jobs:
           find . -type d -path "*/build/outputs/*" | head -20
           echo ""
           mkdir -p ../all_apks
-          find . -name "*.apk" -exec cp {} ../all_apks/ \;
+          find . -name "*.apk" -type f | while IFS= read -r apk; do
+            cp "$apk" ../all_apks/
+          done
           echo "✅ APK yang ditemukan:"
           ls -la ../all_apks/
 
