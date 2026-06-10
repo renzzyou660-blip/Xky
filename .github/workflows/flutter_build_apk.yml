@@ -106,6 +106,10 @@ jobs:
         working-directory: project
         run: |
           flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons 2>&1 | tee ../build_output.log
+          
+          # Debug: cari lokasi APK setelah build
+          echo "🔍 Mencari APK yang dihasilkan..."
+          find . -name "*.apk" -type f 2>/dev/null || echo "Tidak ada APK ditemukan"
 
       - name: Retry Build (if failed)
         if: failure() && inputs.project_type == 'flutter'
@@ -142,14 +146,29 @@ jobs:
           echo "Last 50 lines of build output:" >> error_logs/summary.txt
           tail -50 build_output.log >> error_logs/summary.txt 2>/dev/null || echo "No log available" >> error_logs/summary.txt
 
+      - name: Find and Upload APK
+        id: find_apk
+        run: |
+          # Cari APK di seluruh folder project
+          APK_PATH=$(find project -name "*.apk" -type f 2>/dev/null | head -1)
+          if [ -n "$APK_PATH" ]; then
+            echo "APK ditemukan di: $APK_PATH"
+            mkdir -p apk_artifact
+            cp "$APK_PATH" apk_artifact/
+            echo "apk_found=true" >> $GITHUB_OUTPUT
+          else
+            echo "APK tidak ditemukan!"
+            echo "apk_found=false" >> $GITHUB_OUTPUT
+            # Coba cek isi folder build
+            find project/build -type d 2>/dev/null || echo "Folder build tidak ada"
+          fi
+
       - name: Upload APK
+        if: steps.find_apk.outputs.apk_found == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ inputs.job_id }}
-          path: |
-            project/build/app/outputs/apk/release/*.apk
-            project/build/app/outputs/apk/debug/*.apk
-            project/build/app/outputs/bundle/release/*.aab
+          path: apk_artifact/*.apk
           if-no-files-found: error
 
       - name: Upload Error Log Artifact
