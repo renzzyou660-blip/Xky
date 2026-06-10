@@ -59,24 +59,25 @@ jobs:
       - name: Extract Project
         run: |
           mkdir -p project
-          unzip -o "${{ inputs.zip_path }}" -d project_temp
-          if [ -d "project_temp" ]; then
-            PUBSPEC_DIR=$(find project_temp -name "pubspec.yaml" -type f -printf "%h\n" | head -1)
-            if [ -n "$PUBSPEC_DIR" ] && [ "$PUBSPEC_DIR" != "project" ]; then
-              mv "$PUBSPEC_DIR"/* project/ 2>/dev/null || true
-            else
-              SUBDIRS=$(find project_temp -maxdepth 1 -mindepth 1 -type d)
-              if [ $(echo "$SUBDIRS" | wc -l) -eq 1 ]; then
-                mv $SUBDIRS/* project/ 2>/dev/null || true
-              else
-                mv project_temp/* project/ 2>/dev/null || true
-              fi
-            fi
-            rm -rf project_temp
-          fi
-          if [ -z "$(ls -A project)" ]; then
+          if [ -n "${{ inputs.zip_path }}" ]; then
             unzip -o "${{ inputs.zip_path }}" -d project
+          else
+            echo "ERROR: zip_path wajib diisi"
+            exit 1
           fi
+          # Cek apakah ada subfolder (nested)
+          if [ -f "project/pubspec.yaml" ]; then
+            echo "✅ pubspec.yaml ditemukan di root project"
+          else
+            # Cari pubspec.yaml di subfolder
+            SUBDIR=$(find project -name "pubspec.yaml" -type f -printf "%h\n" | head -1)
+            if [ -n "$SUBDIR" ] && [ "$SUBDIR" != "project" ]; then
+              echo "📁 Memindahkan dari $SUBDIR ke project/"
+              mv "$SUBDIR"/* project/ 2>/dev/null || true
+              mv "$SUBDIR"/.flutter* project/ 2>/dev/null || true
+            fi
+          fi
+          ls -la project/
 
       - name: Flutter Doctor
         if: inputs.project_type == 'flutter'
