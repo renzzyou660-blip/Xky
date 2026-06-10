@@ -33,194 +33,70 @@ jobs:
           java-version: "17"
 
       - name: Setup Flutter
-        if: inputs.project_type == 'flutter'
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: '3.22.4'
           cache: true
 
       - name: Setup Android SDK
-        if: inputs.project_type == 'flutter'
         uses: android-actions/setup-android@v3
 
-      - name: Install Android Components
-        if: inputs.project_type == 'flutter'
+      - name: Install Android SDK Components
         run: |
           yes | sdkmanager --licenses
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-33" \
-            "platforms;android-34" \
-            "platforms;android-35" \
-            "build-tools;33.0.2" \
-            "build-tools;34.0.0" \
-            "build-tools;35.0.0"
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Extract Project
         run: |
           mkdir -p project
-          unzip -o "${{ inputs.zip_path }}" -d temp
-          shopt -s dotglob nullglob
-          dirs=(temp/*)
-          if [ ${#dirs[@]} -eq 1 ] && [ -d "${dirs[0]}" ]; then
-            mv "${dirs[0]}"/* project/ 2>/dev/null || true
-          else
-            mv temp/* project/ 2>/dev/null || true
+          unzip -q -o "${{ inputs.zip_path }}" -d temp
+          # Cek struktur folder
+          if [ -d "temp" ]; then
+            # Cek apakah ada folder tunggal di dalam zip
+            ITEMS=$(ls -1 temp | wc -l)
+            if [ $ITEMS -eq 1 ] && [ -d "temp/$(ls temp)" ]; then
+              mv temp/*/* project/ 2>/dev/null || mv temp/* project/
+            else
+              mv temp/* project/ 2>/dev/null || true
+            fi
           fi
           rm -rf temp
+          ls -la project/
 
-      - name: Flutter Doctor
-        if: inputs.project_type == 'flutter'
-        run: |
-          flutter config --no-analytics
-          flutter precache --android
-          flutter doctor -v
-
-      - name: AndroidX Fix
-        if: inputs.project_type == 'flutter'
+      - name: Validate Flutter Project
         working-directory: project
         run: |
-          mkdir -p android
-          touch android/gradle.properties
-          grep -q "android.useAndroidX" android/gradle.properties || echo "android.useAndroidX=true" >> android/gradle.properties
-          grep -q "android.enableJetifier" android/gradle.properties || echo "android.enableJetifier=true" >> android/gradle.properties
-
-      - name: Clean Project
-        if: inputs.project_type == 'flutter'
-        working-directory: project
-        run: |
-          flutter clean || true
-          rm -rf .dart_tool build
-
-      - name: Pub Get
-        if: inputs.project_type == 'flutter'
-        working-directory: project
-        run: |
-          flutter pub get || (
-            flutter pub cache repair
-            flutter pub get
-          )
-
-      - name: Build APK
-        if: inputs.project_type == 'flutter'
-        working-directory: project
-        run: |
-          flutter build apk \
-            --${{ inputs.build_type }} \
-            --no-tree-shake-icons \
-            2>&1 | tee ../build_output.log
-
-          echo ""
-          echo "📦 Mencari APK setelah build..."
-          find . -name "*.apk" -type f || echo "❌ TIDAK ADA APK!"
-          
-          APK_COUNT=$(find . -name "*.apk" -type f | wc -l)
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "❌❌❌ BUILD GAGAL: Tidak menghasilkan APK! ❌❌❌"
-            echo "Cek log di atas untuk detail error Flutter."
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "❌ pubspec.yaml tidak ditemukan! Bukan Flutter project."
             exit 1
           fi
+          if [ ! -d "android" ]; then
+            echo "❌ Folder android tidak ditemukan!"
+            exit 1
+          fi
+          echo "✅ Flutter project valid"
 
-      - name: Debug Build Outputs
-        if: always()
-        working-directory: project
+      - name: Flutter Doctor
         run: |
-          echo "===== APK ====="
-          find . -name "*.apk" -type f || true
+          flutter doctor -v
 
-          echo ""
-          echo "===== AAB ====="
-          find . -name "*.aab" -type f || true
-
-          echo ""
-          echo "===== BUILD DIR ====="
-          find build -type f | head -100 || true
-
-      - name: Retry Build (if failed)
-        if: failure() && inputs.project_type == 'flutter'
+      - name: Clean & Get Dependencies
         working-directory: project
         run: |
           flutter clean
           flutter pub get
-          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons 2>&1 | tee -a ../build_output.log
+          flutter pub upgrade
 
-      - name: Build AAB as Fallback
-        if: failure() && inputs.project_type == 'flutter'
+      - name: Build APK
         working-directory: project
         run: |
-          flutter build appbundle --release 2>&1 | tee -a ../build_output.log
+          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons
 
-      - name: Collect Error Logs
-        if: failure()
-        run: |
-          mkdir -p error_logs
-          if [ -f "build_output.log" ]; then
-            cp build_output.log error_logs/build_error.log
-          fi
-          if [ -d "project" ]; then
-            find project -name "*.log" -exec cp {} error_logs/ \; 2>/dev/null || true
-          fi
-          if [ -d "project/android" ]; then
-            find project/android -name "*.log" -exec cp {} error_logs/ \; 2>/dev/null || true
-          fi
-          echo "=== BUILD FAILURE SUMMARY ===" > error_logs/summary.txt
-          echo "Job ID: ${{ inputs.job_id }}" >> error_logs/summary.txt
-          echo "Build Type: ${{ inputs.build_type }}" >> error_logs/summary.txt
-          echo "Timestamp: $(date)" >> error_logs/summary.txt
-          echo "" >> error_logs/summary.txt
-          echo "Last 50 lines of build output:" >> error_logs/summary.txt
-          tail -50 build_output.log >> error_logs/summary.txt 2>/dev/null || echo "No log available" >> error_logs/summary.txt
-
-      - name: Collect APK Files
-        run: |
-          mkdir -p apk_artifact
-
-          echo "🔍 Mencari APK di SELURUH folder (bukan hanya project/)..."
-          
-          find . -name "*.apk" -type f 2>/dev/null | while read APK; do
-            echo "✅ APK ditemukan di: $APK"
-            cp "$APK" apk_artifact/
-          done
-
-          if [ -z "$(ls -A apk_artifact 2>/dev/null)" ]; then
-            echo "⚠️ APK tidak ditemukan dengan find biasa, coba cek struktur folder..."
-            
-            echo ""
-            echo "📂 Isi folder project/build (recursive):"
-            find project/build -type f 2>/dev/null | head -50 || echo "Folder build tidak ada"
-            
-            echo ""
-            echo "📂 Isi folder project (seluruhnya, cari file .apk):"
-            find project -type f -name "*.apk" 2>/dev/null || echo "Tidak ada APK di project"
-            
-            echo ""
-            echo "📂 Isi folder root (tempat unzip):"
-            find . -maxdepth 2 -type f -name "*.apk" 2>/dev/null || echo "Tidak ada APK di root"
-            
-            echo ""
-            echo "❌ APK TIDAK DITEMUKAN! Workflow akan gagal."
-            exit 1
-          fi
-
-          echo ""
-          echo "📦 Isi folder artifact:"
-          ls -lah apk_artifact/
-
-          APK_COUNT=$(find apk_artifact -name "*.apk" | wc -l)
-          echo "Total APK ditemukan: $APK_COUNT"
-
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ inputs.job_id }}
-          path: apk_artifact/
+          path: project/build/app/outputs/flutter-apk/*.apk
           retention-days: 3
           if-no-files-found: error
-
-      - name: Upload Error Log Artifact
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: error-${{ inputs.job_id }}
-          path: error_logs/
-          if-no-files-found: ignore
