@@ -105,11 +105,31 @@ jobs:
         if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
-          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons 2>&1 | tee ../build_output.log
-          
-          # Debug: cari lokasi APK setelah build
-          echo "🔍 Mencari APK yang dihasilkan..."
-          find . -name "*.apk" -type f 2>/dev/null || echo "Tidak ada APK ditemukan"
+          set -e
+
+          flutter build apk \
+            --${{ inputs.build_type }} \
+            --no-tree-shake-icons \
+            2>&1 | tee ../build_output.log
+
+          echo ""
+          echo "📦 APK Generated:"
+          find build -name "*.apk" -type f || true
+
+      - name: Debug Build Outputs
+        if: always()
+        working-directory: project
+        run: |
+          echo "===== APK ====="
+          find . -name "*.apk" -type f || true
+
+          echo ""
+          echo "===== AAB ====="
+          find . -name "*.aab" -type f || true
+
+          echo ""
+          echo "===== BUILD DIR ====="
+          find build -type f | head -100 || true
 
       - name: Retry Build (if failed)
         if: failure() && inputs.project_type == 'flutter'
@@ -146,29 +166,39 @@ jobs:
           echo "Last 50 lines of build output:" >> error_logs/summary.txt
           tail -50 build_output.log >> error_logs/summary.txt 2>/dev/null || echo "No log available" >> error_logs/summary.txt
 
-      - name: Find and Upload APK
-        id: find_apk
+      - name: Collect APK Files
         run: |
-          # Cari APK di seluruh folder project
-          APK_PATH=$(find project -name "*.apk" -type f 2>/dev/null | head -1)
-          if [ -n "$APK_PATH" ]; then
-            echo "APK ditemukan di: $APK_PATH"
-            mkdir -p apk_artifact
-            cp "$APK_PATH" apk_artifact/
-            echo "apk_found=true" >> $GITHUB_OUTPUT
-          else
-            echo "APK tidak ditemukan!"
-            echo "apk_found=false" >> $GITHUB_OUTPUT
-            # Coba cek isi folder build
-            find project/build -type d 2>/dev/null || echo "Folder build tidak ada"
+          mkdir -p apk_artifact
+
+          echo "🔍 Mencari semua APK..."
+
+          find project -name "*.apk" -type f | while read APK; do
+            echo "APK ditemukan: $APK"
+            cp "$APK" apk_artifact/
+          done
+
+          echo ""
+          echo "📦 Isi folder artifact:"
+          ls -lah apk_artifact || true
+
+          APK_COUNT=$(find apk_artifact -name "*.apk" | wc -l)
+
+          echo "APK_COUNT=$APK_COUNT"
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "❌ Tidak ada APK ditemukan"
+            echo ""
+            echo "📂 Isi folder build:"
+            find project/build -type f 2>/dev/null || true
+            exit 1
           fi
 
-      - name: Upload APK
-        if: steps.find_apk.outputs.apk_found == 'true'
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ inputs.job_id }}
-          path: apk_artifact/*.apk
+          path: apk_artifact/
+          retention-days: 3
           if-no-files-found: error
 
       - name: Upload Error Log Artifact
