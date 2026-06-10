@@ -116,13 +116,16 @@ jobs:
         working-directory: project
         run: |
           if grep -q "font_awesome_flutter" pubspec.yaml; then
-            sed -i 's/font_awesome_flutter: .*/font_awesome_flutter: ^10.9.0/' pubspec.yaml
-            flutter pub upgrade font_awesome_flutter || true
+            for VER in "^11.0.0" "^10.7.0" "^10.5.0" "^10.9.0"; do
+              sed -i "s/font_awesome_flutter:.*/font_awesome_flutter: $VER/" pubspec.yaml
+              flutter pub get 2>/dev/null && break || true
+            done
+          else
+            flutter pub get || (
+              flutter pub cache repair
+              flutter pub get
+            )
           fi
-          flutter pub get || (
-            flutter pub cache repair
-            flutter pub get
-          )
 
       - name: Build APK
         if: inputs.project_type == 'flutter'
