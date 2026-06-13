@@ -24,11 +24,26 @@ jobs:
     timeout-minutes: 60
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/27.0.12077973
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Java 11 (for fallback)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+          cache: gradle
+
+      - name: Setup Java 17 (restore default)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -51,15 +66,223 @@ jobs:
           yes | sdkmanager --licenses
           sdkmanager \
             "platform-tools" \
+            "platforms;android-30" \
+            "platforms;android-31" \
+            "platforms;android-32" \
             "platforms;android-33" \
             "platforms;android-34" \
             "platforms;android-35" \
+            "platforms;android-36" \
+            "build-tools;28.0.3" \
             "build-tools;33.0.2" \
             "build-tools;34.0.0" \
             "build-tools;35.0.0" \
-            "platforms;android-36"
+            "build-tools;36.0.0" \
+            "ndk;27.0.12077973" \
+            "cmake;3.22.1"
 
       - name: Extract Project
+        run: |
+          mkdir -p project
+          if [ -n "${{ inputs.zip_path }}" ]; then
+            unzip -o "${{ inputs.zip_path }}" -d project
+          else
+            echo "ERROR: zip_path wajib diisi"
+            exit 1
+          fi
+          if [ -f "project/pubspec.yaml" ]; then
+            echo "✅ pubspec.yaml ditemukan di root project"
+          else
+            SUBDIR=$(find project -name "pubspec.yaml" -type f -printf "%h\n" | head -1)
+            if [ -n "$SUBDIR" ] && [ "$SUBDIR" != "project" ]; then
+              echo "📁 Memindahkan dari $SUBDIR ke project/"
+              mv "$SUBDIR"/* project/ 2>/dev/null || true
+              mv "$SUBDIR"/.flutter* project/ 2>/dev/null || true
+            fi
+          fi
+          ls -la project/
+
+      - name: Flutter Version Detector
+        if: inputs.project_type == 'flutter'
+        working-directory: project
+        run: |
+          echo "=== Flutter Version Detector ==="
+          if [ -f "pubspec.yaml" ]; then
+            FLUTTER_VER=$(grep "sdk:" pubspec.yaml | head -1)
+            echo "SDK constraint: $FLUTTER_VER"
+          fi
+          flutter --version
+
+      - name: Flutter Doctor
+        if: inputs.project_type == 'flutter'
+        run: |
+          flutter config --no-analytics
+          flutter precache --android
+          flutter doctor -v
+
+      - name: AndroidX Fix
+        if: inputs.project_type == 'flutter'
+        working-directory: project
+        run: |
+          mkdir -p android
+          touch android/gradle.properties
+          grep -q "android.useAndroidX" android/gradle.properties || echo "android.useAndroidX=true" >> android/gradle.properties
+          grep -q "android.enableJetifier" android/gradle.properties || echo "android.enableJetifier=true" >> android/gradle.properties
+          if [ -f "android/app/build.gradle.kts" ]; then
+            if ! grep -q "compileSdk" android/app/build.gradle.kts; then
+              echo "Tidak mengubah compileSdk (kts)"
+            fi
+          fi
+          if [ -f "android/app/build.gradle" ]; then
+            if ! grep -q "compileSdk" android/app/build.gradle; then
+              echo "Tidak mengubah compileSdk (groovy)"
+            fi
+          fi
+
+      - name: Fix Gradle Permission
+        if: inputs.project_type == 'flutter'
+        working-directory: project
+        run: |
+          chmod +x android/gradlew || true
+          chmod -R 777 android || true
+
+      - name: Clean Project
+        if: inputs.project_type == 'flutter'
+        working-directory: project
+        run: |
+          flutter clean || true
+          rm -rf .dart_tool build
+
+      - name: Pub Cache Repair
+        if: inputs.project_type == 'flutter'
+        working-directory: project
+        run: |
+          flutter pub cache repair || true
+
+      - name: Pub Get
+        if: inputs.project_type == 'flutter'
+        working-directory: project
+        run: |
+          if grep -q "font_awesome_flutter" pubspec.yaml; then
+            for VER in "^11.0.0" "^10.7.0" "^10.5.0" "^10.9.0"; do
+              sed -i "s/font_awesome_flutter:.*/font_awesome_flutter: $VER/" pubspec.yaml
+              flutter pub get 2>/dev/null && break || true
+            done
+          else
+            flutter pub get || (
+              flutter pub cache repair
+              flutter pub get
+            )
+          fi
+
+      - name: Check Outdated Dependencies
+        if: inputs.project_type == 'flutter'
+        working-directory: project
+        run: |
+          dart pub outdated || true
+
+      - name: Build APK Release
+        if: inputs.project_type == 'flutter'
+        working-directory: project
+        run: |
+          flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons --android-skip-build-dependency-validation 2>&1 | tee ../build_output.log || (
+            echo "=== Java 17 gagal, coba Java 11 ===" | tee -a ../build_output.log
+            export JAVA_HOME=$JAVA_11_HOME
+            flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons --android-skip-build-dependency-validation 2>&1 | tee -a ../build_output.log
+          )
+
+      - name: Retry Build APK Debug (if failed)
+        if: failure() && inputs.project_type == 'flutter'
+        working-directory: project
+        run: |
+          flutter clean
+          flutter pub get
+          flutter build apk --debug --no-tree-shake-icons --android-skip-build-dependency-validation 2>&1 | tee -a ../build_output.log || (
+            echo "=== Java 17 gagal, coba Java 11 ===" | tee -a ../build_output.log
+            export JAVA_HOME=$JAVA_11_HOME
+            flutter build apk --debug --no-tree-shake-icons --android-skip-build-dependency-validation 2>&1 | tee -a ../build_output.log
+          )
+
+      - name: Build AAB as Fallback (if failed)
+        if: failure() && inputs.project_type == 'flutter'
+        working-directory: project
+        run: |
+          flutter build appbundle --release 2>&1 | tee -a ../build_output.log || (
+            export JAVA_HOME=$JAVA_11_HOME
+            flutter build appbundle --release 2>&1 | tee -a ../build_output.log
+          )
+
+      - name: Find and Collect APK & AAB
+        working-directory: project
+        run: |
+          echo "🔍 Mencari semua file .apk di project..."
+          find . -name "*.apk" -type f
+          echo ""
+          echo "🔍 Mencari semua file .aab di project..."
+          find . -name "*.aab" -type f
+          echo ""
+          echo "📁 Mencari folder build/outputs..."
+          find . -type d -path "*/build/outputs/*" | head -20
+          echo ""
+          mkdir -p ../all_apks
+          find . -name "*.apk" -type f | while IFS= read -r apk; do
+            cp "$apk" ../all_apks/
+          done
+          find . -name "*.aab" -type f | while IFS= read -r aab; do
+            cp "$aab" ../all_apks/
+          done
+          echo "✅ File yang ditemukan:"
+          ls -la ../all_apks/
+
+      - name: Collect Error Logs
+        if: failure()
+        run: |
+          mkdir -p error_logs
+          if [ -f "build_output.log" ]; then
+            cp build_output.log error_logs/build_error.log
+            tail -200 build_output.log > error_logs/build_error_last200.log
+          fi
+          if [ -d "project" ]; then
+            find project -name "*.log" -exec cp {} error_logs/ \; 2>/dev/null || true
+          fi
+          if [ -d "project/android" ]; then
+            find project/android -name "*.log" -exec cp {} error_logs/ \; 2>/dev/null || true
+          fi
+          echo "=== BUILD FAILURE SUMMARY ===" > error_logs/summary.txt
+          echo "Job ID: ${{ inputs.job_id }}" >> error_logs/summary.txt
+          echo "Build Type: ${{ inputs.build_type }}" >> error_logs/summary.txt
+          echo "Timestamp: $(date)" >> error_logs/summary.txt
+          echo "" >> error_logs/summary.txt
+          echo "Last 100 lines of build output:" >> error_logs/summary.txt
+          tail -100 build_output.log >> error_logs/summary.txt 2>/dev/null || echo "No log available" >> error_logs/summary.txt
+          echo "" >> error_logs/summary.txt
+          echo "Flutter version:" >> error_logs/summary.txt
+          flutter --version >> error_logs/summary.txt 2>/dev/null || echo "Flutter not available" >> error_logs/summary.txt
+
+      - name: Pack Build Result
+        run: |
+          if [ -d "all_apks" ] && [ "$(ls -A all_apks)" ]; then
+            zip -r build_result.zip all_apks
+            echo "✅ build_result.zip siap upload"
+          else
+            echo "⚠️ Tidak ada file APK/AAB, tetap buat zip kosong"
+            mkdir -p all_apks
+            zip -r build_result.zip all_apks
+          fi
+
+      - name: Upload Build Result
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ inputs.job_id }}
+          path: build_result.zip
+
+      - name: Upload Error Log Artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-${{ inputs.job_id }}
+          path: error_logs/
+          if-no-files-found: ignore      - name: Extract Project
         run: |
           mkdir -p project
           if [ -n "${{ inputs.zip_path }}" ]; then
