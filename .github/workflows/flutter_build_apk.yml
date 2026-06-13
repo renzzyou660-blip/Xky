@@ -41,7 +41,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "11"
-          cache: gradle
 
       - name: Setup Java 17 (restore default)
         uses: actions/setup-java@v4
@@ -193,8 +192,8 @@ jobs:
 
       - name: Retry Build APK Debug (if failed)
         if: failure() && inputs.project_type == 'flutter'
-        working-directory: project
         run: |
+          cd project || { echo "folder project tidak ada, skip"; exit 0; }
           flutter clean
           flutter pub get
           flutter build apk --debug --no-tree-shake-icons --android-skip-build-dependency-validation 2>&1 | tee -a ../build_output.log || (
@@ -205,16 +204,16 @@ jobs:
 
       - name: Build AAB as Fallback (if failed)
         if: failure() && inputs.project_type == 'flutter'
-        working-directory: project
         run: |
+          cd project || { echo "folder project tidak ada, skip"; exit 0; }
           flutter build appbundle --release 2>&1 | tee -a ../build_output.log || (
             export JAVA_HOME=$JAVA_11_HOME
             flutter build appbundle --release 2>&1 | tee -a ../build_output.log
           )
 
       - name: Find and Collect APK & AAB
-        working-directory: project
         run: |
+          cd project || { echo "folder project tidak ada"; mkdir -p ../all_apks; exit 0; }
           echo "🔍 Mencari semua file .apk di project..."
           find . -name "*.apk" -type f
           echo ""
