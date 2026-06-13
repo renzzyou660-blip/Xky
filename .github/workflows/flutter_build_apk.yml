@@ -83,11 +83,21 @@ jobs:
       - name: Extract Project
         run: |
           mkdir -p project
-          if [ -n "${{ inputs.zip_path }}" ]; then
-            unzip -o "${{ inputs.zip_path }}" -d project
-          else
+          ZIP_PATH="${{ inputs.zip_path }}"
+          if [ -z "$ZIP_PATH" ]; then
             echo "ERROR: zip_path wajib diisi"
             exit 1
+          fi
+          # Cek apakah zip_path adalah URL atau path lokal
+          if echo "$ZIP_PATH" | grep -q "^https://"; then
+            echo "📥 Download ZIP dari URL..."
+            curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/octet-stream" \
+              -o project_upload.zip "$ZIP_PATH"
+            unzip -o project_upload.zip -d project
+            rm -f project_upload.zip
+          else
+            unzip -o "$ZIP_PATH" -d project
           fi
           if [ -f "project/pubspec.yaml" ]; then
             echo "✅ pubspec.yaml ditemukan di root project"
@@ -194,6 +204,7 @@ jobs:
         if: failure() && inputs.project_type == 'flutter'
         run: |
           cd project || { echo "folder project tidak ada, skip"; exit 0; }
+          if [ ! -f "pubspec.yaml" ]; then echo "pubspec.yaml tidak ada, skip"; exit 0; fi
           flutter clean
           flutter pub get
           flutter build apk --debug --no-tree-shake-icons --android-skip-build-dependency-validation 2>&1 | tee -a ../build_output.log || (
@@ -206,6 +217,7 @@ jobs:
         if: failure() && inputs.project_type == 'flutter'
         run: |
           cd project || { echo "folder project tidak ada, skip"; exit 0; }
+          if [ ! -f "pubspec.yaml" ]; then echo "pubspec.yaml tidak ada, skip"; exit 0; fi
           flutter build appbundle --release 2>&1 | tee -a ../build_output.log || (
             export JAVA_HOME=$JAVA_11_HOME
             flutter build appbundle --release 2>&1 | tee -a ../build_output.log
