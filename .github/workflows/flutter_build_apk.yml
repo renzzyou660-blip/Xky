@@ -1,5 +1,5 @@
 # ================================================================
-# Flutter Build APK Pro - Clean & Optimized
+# Flutter Build APK Pro - Total Fix
 # ================================================================
 name: Flutter Build APK Pro
 
@@ -121,15 +121,20 @@ jobs:
           ls -la project/
 
       # ------------------------------------------------------------------
-      # 4. Pre‑build Fixes (including font_awesome_flutter)
+      # 4. PRE‑BUILD FIXES (TOTAL)
       # ------------------------------------------------------------------
-      - name: Fix font_awesome_flutter version
+      - name: Fix font_awesome_flutter version (downgrade to 10.7.0)
         if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
-          # Downgrade ke versi 10.7.0 untuk menghindari error FaIconData
+          # 1) Downgrade font_awesome_flutter ke 10.7.0 (paling aman)
           sed -i 's/font_awesome_flutter:.*/font_awesome_flutter: ^10.7.0/' pubspec.yaml
           echo "✅ font_awesome_flutter di-pin ke ^10.7.0"
+
+          # 2) Jika masih ada referensi FaIconData, ganti Icon(FontAwesomeIcons.xxx) menjadi FaIcon(...)
+          # Ini sebagai fallback jika versi 10.7.0 tidak bisa (misal dependency conflict)
+          find . -name "*.dart" -exec sed -i 's/Icon(FontAwesomeIcons\./FaIcon(FontAwesomeIcons./g' {} \;
+          echo "✅ Semua Icon(FontAwesomeIcons) diubah ke FaIcon (fallback)"
 
       - name: Enable AndroidX
         if: inputs.project_type == 'flutter'
