@@ -1,3 +1,6 @@
+# ================================================================
+# Flutter Build APK Pro - Clean & Optimized
+# ================================================================
 name: Flutter Build APK Pro
 
 on:
@@ -6,17 +9,21 @@ on:
       job_id:
         required: true
         type: string
+        description: "Unique job identifier"
       zip_path:
         required: true
         type: string
+        description: "Path to the project zip file"
       project_type:
         required: false
         default: flutter
         type: string
+        description: "Project type (currently only flutter)"
       build_type:
         required: false
         default: release
         type: string
+        description: "Build type: release or debug"
 
 jobs:
   build:
@@ -28,26 +35,34 @@ jobs:
       ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/27.0.12077973
 
     steps:
-      - uses: actions/checkout@v4
+      # ------------------------------------------------------------------
+      # 1. Checkout & Environment Setup
+      # ------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Setup Java 17
+      - name: Setup Java 17 (primary)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Java 11 (for fallback)
+      - name: Setup Java 11 (fallback)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "11"
+          cache: gradle
 
-      - name: Setup Java 17 (restore default)
+      - name: Restore Java 17 as default
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
+      # ------------------------------------------------------------------
+      # 2. Flutter & Android SDK Setup
+      # ------------------------------------------------------------------
       - name: Setup Flutter
         if: inputs.project_type == 'flutter'
         uses: subosito/flutter-action@v2
@@ -80,25 +95,19 @@ jobs:
             "ndk;27.0.12077973" \
             "cmake;3.22.1"
 
-      - name: Extract Project
+      # ------------------------------------------------------------------
+      # 3. Extract Project
+      # ------------------------------------------------------------------
+      - name: Extract project archive
         run: |
           mkdir -p project
-          ZIP_PATH="${{ inputs.zip_path }}"
-          if [ -z "$ZIP_PATH" ]; then
+          if [ -n "${{ inputs.zip_path }}" ]; then
+            unzip -o "${{ inputs.zip_path }}" -d project
+          else
             echo "ERROR: zip_path wajib diisi"
             exit 1
           fi
-          # Cek apakah zip_path adalah URL atau path lokal
-          if echo "$ZIP_PATH" | grep -q "^https://"; then
-            echo "📥 Download ZIP dari URL..."
-            curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/octet-stream" \
-              -o project_upload.zip "$ZIP_PATH"
-            unzip -o project_upload.zip -d project
-            rm -f project_upload.zip
-          else
-            unzip -o "$ZIP_PATH" -d project
-          fi
+          # Jika pubspec.yaml berada di dalam subfolder, pindahkan ke root
           if [ -f "project/pubspec.yaml" ]; then
             echo "✅ pubspec.yaml ditemukan di root project"
           else
@@ -111,25 +120,18 @@ jobs:
           fi
           ls -la project/
 
-      - name: Flutter Version Detector
+      # ------------------------------------------------------------------
+      # 4. Pre‑build Fixes (including font_awesome_flutter)
+      # ------------------------------------------------------------------
+      - name: Fix font_awesome_flutter version
         if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
-          echo "=== Flutter Version Detector ==="
-          if [ -f "pubspec.yaml" ]; then
-            FLUTTER_VER=$(grep "sdk:" pubspec.yaml | head -1)
-            echo "SDK constraint: $FLUTTER_VER"
-          fi
-          flutter --version
+          # Downgrade ke versi 10.7.0 untuk menghindari error FaIconData
+          sed -i 's/font_awesome_flutter:.*/font_awesome_flutter: ^10.7.0/' pubspec.yaml
+          echo "✅ font_awesome_flutter di-pin ke ^10.7.0"
 
-      - name: Flutter Doctor
-        if: inputs.project_type == 'flutter'
-        run: |
-          flutter config --no-analytics
-          flutter precache --android
-          flutter doctor -v
-
-      - name: AndroidX Fix
+      - name: Enable AndroidX
         if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
@@ -137,115 +139,109 @@ jobs:
           touch android/gradle.properties
           grep -q "android.useAndroidX" android/gradle.properties || echo "android.useAndroidX=true" >> android/gradle.properties
           grep -q "android.enableJetifier" android/gradle.properties || echo "android.enableJetifier=true" >> android/gradle.properties
-          if [ -f "android/app/build.gradle.kts" ]; then
-            if ! grep -q "compileSdk" android/app/build.gradle.kts; then
-              echo "Tidak mengubah compileSdk (kts)"
-            fi
-          fi
-          if [ -f "android/app/build.gradle" ]; then
-            if ! grep -q "compileSdk" android/app/build.gradle; then
-              echo "Tidak mengubah compileSdk (groovy)"
-            fi
-          fi
 
-      - name: Fix Gradle Permission
+      - name: Set Gradle executable permissions
         if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
           chmod +x android/gradlew || true
           chmod -R 777 android || true
 
-      - name: Clean Project
+      # ------------------------------------------------------------------
+      # 5. Dependency & Cache Repair
+      # ------------------------------------------------------------------
+      - name: Clean previous build artifacts
         if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
           flutter clean || true
           rm -rf .dart_tool build
 
-      - name: Pub Cache Repair
+      - name: Repair pub cache
+        if: inputs.project_type == 'flutter'
+        working-directory: project
+        run: flutter pub cache repair || true
+
+      - name: Get dependencies
         if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
-          flutter pub cache repair || true
+          flutter pub get || (
+            flutter pub cache repair
+            flutter pub get
+          )
 
-      - name: Pub Get
+      - name: Check outdated dependencies (optional)
         if: inputs.project_type == 'flutter'
         working-directory: project
-        run: |
-          if grep -q "font_awesome_flutter" pubspec.yaml; then
-            for VER in "^11.0.0" "^10.7.0" "^10.5.0" "^10.9.0"; do
-              sed -i "s/font_awesome_flutter:.*/font_awesome_flutter: $VER/" pubspec.yaml
-              flutter pub get 2>/dev/null && break || true
-            done
-          else
-            flutter pub get || (
-              flutter pub cache repair
-              flutter pub get
-            )
-          fi
+        run: dart pub outdated || true
 
-      - name: Check Outdated Dependencies
-        if: inputs.project_type == 'flutter'
-        working-directory: project
-        run: |
-          dart pub outdated || true
-
-      - name: Build APK Release
+      # ------------------------------------------------------------------
+      # 6. Build APK (with fallback)
+      # ------------------------------------------------------------------
+      - name: Build APK (release or debug)
         if: inputs.project_type == 'flutter'
         working-directory: project
         run: |
           flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons --android-skip-build-dependency-validation 2>&1 | tee ../build_output.log || (
-            echo "=== Java 17 gagal, coba Java 11 ===" | tee -a ../build_output.log
+            echo "=== Java 17 gagal, mencoba Java 11 ===" | tee -a ../build_output.log
             export JAVA_HOME=$JAVA_11_HOME
             flutter build apk --${{ inputs.build_type }} --no-tree-shake-icons --android-skip-build-dependency-validation 2>&1 | tee -a ../build_output.log
           )
 
-      - name: Retry Build APK Debug (if failed)
+      - name: Retry with debug if release failed
         if: failure() && inputs.project_type == 'flutter'
+        working-directory: project
         run: |
-          cd project || { echo "folder project tidak ada, skip"; exit 0; }
-          if [ ! -f "pubspec.yaml" ]; then echo "pubspec.yaml tidak ada, skip"; exit 0; fi
           flutter clean
           flutter pub get
           flutter build apk --debug --no-tree-shake-icons --android-skip-build-dependency-validation 2>&1 | tee -a ../build_output.log || (
-            echo "=== Java 17 gagal, coba Java 11 ===" | tee -a ../build_output.log
             export JAVA_HOME=$JAVA_11_HOME
             flutter build apk --debug --no-tree-shake-icons --android-skip-build-dependency-validation 2>&1 | tee -a ../build_output.log
           )
 
-      - name: Build AAB as Fallback (if failed)
+      - name: Build AAB as final fallback
         if: failure() && inputs.project_type == 'flutter'
+        working-directory: project
         run: |
-          cd project || { echo "folder project tidak ada, skip"; exit 0; }
-          if [ ! -f "pubspec.yaml" ]; then echo "pubspec.yaml tidak ada, skip"; exit 0; fi
           flutter build appbundle --release 2>&1 | tee -a ../build_output.log || (
             export JAVA_HOME=$JAVA_11_HOME
             flutter build appbundle --release 2>&1 | tee -a ../build_output.log
           )
 
-      - name: Find and Collect APK & AAB
+      # ------------------------------------------------------------------
+      # 7. Collect Artifacts
+      # ------------------------------------------------------------------
+      - name: Collect APK and AAB files
+        working-directory: project
         run: |
-          cd project || { echo "folder project tidak ada"; mkdir -p ../all_apks; exit 0; }
-          echo "🔍 Mencari semua file .apk di project..."
-          find . -name "*.apk" -type f
-          echo ""
-          echo "🔍 Mencari semua file .aab di project..."
-          find . -name "*.aab" -type f
-          echo ""
-          echo "📁 Mencari folder build/outputs..."
-          find . -type d -path "*/build/outputs/*" | head -20
-          echo ""
           mkdir -p ../all_apks
-          find . -name "*.apk" -type f | while IFS= read -r apk; do
-            cp "$apk" ../all_apks/
-          done
-          find . -name "*.aab" -type f | while IFS= read -r aab; do
-            cp "$aab" ../all_apks/
-          done
+          find . -name "*.apk" -type f -exec cp {} ../all_apks/ \;
+          find . -name "*.aab" -type f -exec cp {} ../all_apks/ \;
           echo "✅ File yang ditemukan:"
           ls -la ../all_apks/
 
-      - name: Collect Error Logs
+      - name: Pack build result
+        run: |
+          if [ -d "all_apks" ] && [ "$(ls -A all_apks)" ]; then
+            zip -r build_result.zip all_apks
+            echo "✅ build_result.zip siap upload"
+          else
+            echo "⚠️ Tidak ada file APK/AAB, membuat zip kosong"
+            mkdir -p all_apks
+            zip -r build_result.zip all_apks
+          fi
+
+      - name: Upload build result
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ inputs.job_id }}
+          path: build_result.zip
+
+      # ------------------------------------------------------------------
+      # 8. Error Logging (on failure)
+      # ------------------------------------------------------------------
+      - name: Collect error logs
         if: failure()
         run: |
           mkdir -p error_logs
@@ -256,9 +252,6 @@ jobs:
           if [ -d "project" ]; then
             find project -name "*.log" -exec cp {} error_logs/ \; 2>/dev/null || true
           fi
-          if [ -d "project/android" ]; then
-            find project/android -name "*.log" -exec cp {} error_logs/ \; 2>/dev/null || true
-          fi
           echo "=== BUILD FAILURE SUMMARY ===" > error_logs/summary.txt
           echo "Job ID: ${{ inputs.job_id }}" >> error_logs/summary.txt
           echo "Build Type: ${{ inputs.build_type }}" >> error_logs/summary.txt
@@ -266,28 +259,8 @@ jobs:
           echo "" >> error_logs/summary.txt
           echo "Last 100 lines of build output:" >> error_logs/summary.txt
           tail -100 build_output.log >> error_logs/summary.txt 2>/dev/null || echo "No log available" >> error_logs/summary.txt
-          echo "" >> error_logs/summary.txt
-          echo "Flutter version:" >> error_logs/summary.txt
-          flutter --version >> error_logs/summary.txt 2>/dev/null || echo "Flutter not available" >> error_logs/summary.txt
 
-      - name: Pack Build Result
-        run: |
-          if [ -d "all_apks" ] && [ "$(ls -A all_apks)" ]; then
-            zip -r build_result.zip all_apks
-            echo "✅ build_result.zip siap upload"
-          else
-            echo "⚠️ Tidak ada file APK/AAB, tetap buat zip kosong"
-            mkdir -p all_apks
-            zip -r build_result.zip all_apks
-          fi
-
-      - name: Upload Build Result
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-${{ inputs.job_id }}
-          path: build_result.zip
-
-      - name: Upload Error Log Artifact
+      - name: Upload error logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
